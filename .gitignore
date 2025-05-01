@@ -1,0 +1,240 @@
+# .gitignore
+# Comprehensive gitignore for a polyglot monorepo
+
+# General
+#---------------------------------------------------------------------------
+*.log
+logs/
+*.tmp
+*.temp
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Secrets & Credentials (NEVER commit these!)
+#---------------------------------------------------------------------------
+*.env
+.envrc
+credentials.json
+secrets.yaml
+secrets.yml
+*.pem
+*.key
+config.json # Add specific config files containing secrets if necessary
+
+# IDEs and Editors
+#---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# Build & Dependency Artifacts
+#---------------------------------------------------------------------------
+# Rust
+target/
+Cargo.lock # Usually committed, but can be ignored in libraries if preferred. For binaries, commit it.
+
+# C/C++ (CMake, Make, etc.)
+build/
+Build/
+build-*/
+Build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+*.pch
+*.gch
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# Java / JVM (Gradle, Maven)
+.gradle/
+build/
+out/
+target/ # Maven target directory
+*.jar
+*.war
+*.ear
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+*.egg-info/
+venv/
+.venv/
+env/
+.env/
+*.egg
+*.whl
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node.js / JavaScript / TypeScript
+node_modules/
+dist/
+build/
+out/
+coverage/
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.yarn/
+.pnpm-store/
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+pkg/ # Can contain compiled packages, often ignored
+
+# .NET / F# / C#
+bin/
+obj/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vspscc
+*.vssscc
+*_i.c
+*_p.c
+*_h.h
+*.ilk
+*.meta
+*.obj
+*.pch
+*.pdb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp
+*.tmp_proj
+*.log
+*.vsix
+*.psess
+*.vsp
+*.vspx
+*.sap
+*.orig
+*.[Cc]ache
+*.aps
+*.ncb
+*.suo
+*.bak
+*.cache
+*.log
+*.diff
+*.patch
+*.DS_Store
+*.csproj.user
+*.vbproj.user
+*.fsproj.user
+
+# OCaml (dune, opam)
+_build/
+*.install
+*.cmx
+*.cmo
+*.cmi
+*.cma
+*.a
+*.o
+*.so
+
+# Haskell (stack, cabal)
+.stack-work/
+dist/
+dist-newstyle/
+cabal-dev/
+*.o
+*.hi
+*.dyn_o
+*.dyn_hi
+
+# Lisp / Scheme
+*.fasl
+*.image
+
+# Julia
+Manifest.toml # Often committed, but can be ignored if strict reproducibility via Project.toml is enough
+logs/
+results/
+*.jld2 # Large data files
+
+# Mojo
+__pycache__/ # Mojo might use this
+*.mojopkg # Compiled Mojo package
+
+# Nix
+result* # Symlinks created by nix-build
+.direnv/ # direnv integration with Nix
+flake.lock # Commit this for reproducible builds
+
+# Docker
+docker-compose.override.yml # Local overrides
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+crash.log
+*.tfvars # Often contain secrets
+
+# Coq
+*.vo
+*.glob
+*.aux
+*.vos
+*.vok
+
+# Backtesting / ML Models / Data
+data/ # Ignore large datasets if not meant to be in Git
+models/ # Ignore large trained models
+results/ # Ignore generated reports/plots
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Specific Project Files (Customize as needed)
+# e.g., /infrastructure-go/server-binary
+# e.g., /ui-sveltekit-typescript/.svelte-kit/
+.svelte-kit/
+.vercel/
+.netlify/
+
