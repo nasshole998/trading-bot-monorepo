@@ -1,0 +1,29 @@
+grpc:
+  listen_address: "0.0.0.0:50051" # Address for this service's gRPC server
+
+health_check:
+  listen_address: "0.0.0.0:8080" # Address for the HTTP health check server
+
+max_history_size: 2000 # Max prices to store per symbol
+
+indicators:
+  sma:
+    - name: "SMA_20"
+      symbol: "btc_usdt"
+      period: 20
+    - name: "SMA_50"
+      symbol: "btc_usdt"
+      period: 50
+    - name: "SMA_200"
+      symbol: "eth_btc"
+      period: 200
+  rsi:
+    - name: "RSI_14"
+      symbol: "btc_usdt"
+      period: 14
+  macd:
+    - name: "MACD_12_26_9"
+      symbol: "btc_usdt"
+      fast_period: 12
+      slow_period: 26
+      signal_period: 9

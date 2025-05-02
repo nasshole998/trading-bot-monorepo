@@ -1,58 +1,96 @@
-// indicator-engine-cpp/src/config.cpp
 #include "config.h"
-#include "logging.h" // Use logging within config parsing
-#include <iostream> // For basic error output before logging is up
-#include <string>
-#include <stdexcept> // For std::stoi, std::stoul
+#include <iostream>
+#include <stdexcept> // For runtime_error
 
-// Basic command line argument parser
-bool parse_config(int argc, char* argv[], EngineConfig& config) {
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        try {
-            if ((arg == "-p" || arg == "--port") && i + 1 < argc) {
-                config.grpc_port = static_cast<uint16_t>(std::stoul(argv[++i]));
-            } else if ((arg == "-t" || arg == "--threads") && i + 1 < argc) {
-                config.thread_pool_size = std::stoi(argv[++i]);
-            } else if ((arg == "-l" || arg == "--loglevel") && i + 1 < argc) {
-                config.log_level = argv[++i];
-            } else if ((arg == "-f" || arg == "--logfile") && i + 1 < argc) {
-                config.log_file = argv[++i];
-            } else if (arg == "--no-talib") {
-                config.use_ta_lib = false;
-            } else if (arg == "--gpu") {
-                config.enable_gpu = true;
-            }
-             else if (arg == "-h" || arg == "--help") {
-                std::cerr << "Usage: " << argv[0] << " [options]\n";
-                std::cerr << "Options:\n";
-                std::cerr << "  -p, --port PORT        gRPC server port (default: 50051)\n";
-                std::cerr << "  -t, --threads N        Number of worker threads (default: auto)\n";
-                std::cerr << "  -l, --loglevel LEVEL   Log level (trace, debug, info, warn, error, critical, off) (default: info)\n";
-                std::cerr << "  -f, --logfile PATH     Path to log file (default: console only)\n";
-                std::cerr << "  --no-talib             Disable TA-Lib usage (if compiled in)\n";
-                std::cerr << "  --gpu                  Enable GPU usage (if compiled in)\n";
-                std::cerr << "  -h, --help             Show this help message\n";
-                return false; // Indicate help message was shown, program should exit
-            }
-            else {
-                std::cerr << "Warning: Ignoring unknown argument: " << arg << std::endl;
-            }
-        } catch (const std::exception& e) {
-             std::cerr << "Error parsing argument for " << arg << ": " << e.what() << std::endl;
-             return false; // Indicate parsing failure
+void Config::load(const std::string& filepath) {
+    try {
+        YAML::Node config = YAML::LoadFile(filepath);
+
+        // Load gRPC config
+        if (config["grpc"]) {
+            grpc.listen_address = config["grpc"]["listen_address"].as<std::string>();
+        } else {
+            throw std::runtime_error("Missing 'grpc' section in config");
         }
+
+        // Load Health Check config
+         if (config["health_check"]) {
+            health_check.listen_address = config["health_check"]["listen_address"].as<std::string>();
+        } else {
+            // Optional: provide a default or make it required
+            health_check.listen_address = "0.0.0.0:8080"; // Default
+            std::cerr << "Warning: Missing 'health_check' section in config, using default address." << std::endl;
+        }
+
+
+        // Load general settings
+         if (config["max_history_size"]) {
+             max_history_size = config["max_history_size"].as<int>();
+             if (max_history_size <= 0) {
+                 max_history_size = 1000; // Default
+                 std::cerr << "Warning: Invalid 'max_history_size', using default 1000." << std::endl;
+             }
+         }
+
+
+        // Load indicator configurations
+        if (config["indicators"]) {
+            if (config["indicators"]["sma"]) {
+                sma_configs = config["indicators"]["sma"].as<std::vector<Indicators::SmaConfig>>();
+            }
+            if (config["indicators"]["rsi"]) {
+                rsi_configs = config["indicators"]["rsi"].as<std::vector<Indicators::RsiConfig>>();
+            }
+             if (config["indicators"]["macd"]) {
+                macd_configs = config["indicators"]["macd"].as<std::vector<Indicators::MacdConfig>>();
+            }
+            // Load other indicators...
+        } else {
+             std::cerr << "Warning: Missing 'indicators' section in config." << std::endl;
+        }
+
+
+    } catch (const YAML::Exception& e) {
+        throw std::runtime_error("YAML parsing error: " + std::string(e.what()));
+    } catch (const std::runtime_error& e) {
+         throw e; // Re-throw specific runtime errors
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Unknown config loading error: " + std::string(e.what()));
     }
-
-    // Basic validation
-    if (config.thread_pool_size < 0) {
-        std::cerr << "Error: Thread pool size cannot be negative." << std::endl;
-        return false;
-    }
-
-    // Note: Further validation (e.g., log level string validity) can be added here
-    // or handled by the logging initialization function.
-
-    return true; // Indicate successful parsing
 }
 
+// Implement YAML parsing for indicator config structures
+namespace YAML {
+    bool convert<Indicators::SmaConfig>::decode(const Node& node, Indicators::SmaConfig& config) {
+        if (!node.IsMap()) return false;
+        if (node["name"] && node["symbol"] && node["period"]) {
+            config.name = node["name"].as<std::string>();
+            config.symbol = node["symbol"].as<std::string>();
+            config.period = node["period"].as<int>();
+            return true;
+        }
+        return false;
+    }
+     bool convert<Indicators::RsiConfig>::decode(const Node& node, Indicators::RsiConfig& config) {
+        if (!node.IsMap()) return false;
+        if (node["name"] && node["symbol"] && node["period"]) {
+            config.name = node["name"].as<std::string>();
+            config.symbol = node["symbol"].as<std::string>();
+            config.period = node["period"].as<int>();
+            return true;
+        }
+        return false;
+    }
+     bool convert<Indicators::MacdConfig>::decode(const Node& node, Indicators::MacdConfig& config) {
+        if (!node.IsMap()) return false;
+        if (node["name"] && node["symbol"] && node["fast_period"] && node["slow_period"] && node["signal_period"]) {
+            config.name = node["name"].as<std::string>();
+            config.symbol = node["symbol"].as<std::string>();
+            config.fast_period = node["fast_period"].as<int>();
+            config.slow_period = node["slow_period"].as<int>();
+            config.signal_period = node["signal_period"].as<int>();
+            return true;
+        }
+        return false;
+    }
+}

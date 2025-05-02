@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package indicator_data;
+
+import "google/protobuf/timestamp.proto";
+
+// Service for streaming computed technical indicator values to consumers.
+service IndicatorService {
+  // Server-side streaming RPC to subscribe to indicator updates.
+  // The client (Strategy Engine) calls this, and the server (Indicator Engine) streams updates.
+  rpc SubscribeToIndicators(IndicatorSubscriptionRequest) returns (stream IndicatorValue);
+}
+
+message IndicatorSubscriptionRequest {
+  // Define what the client wants to subscribe to.
+  // Could be a list of symbols, specific indicators, or just subscribe to all updates.
+  repeated string symbols = 1;
+  repeated string indicator_names = 2; // e.g., ["SMA_20", "RSI_14_Line", "MACD_12_26_9_Signal"]
+  // If empty lists, maybe subscribe to everything.
+}
+
+message IndicatorValue {
+  string exchange = 1;         // e.g., "binance"
+  string symbol = 2;           // e.g., "btc_usdt" (normalized)
+  string indicator_name = 3;   // e.g., "SMA_50", "RSI_14", "MACD_12_26_9_Line"
+  string value = 4;            // Use string for Decimal precision
+  google.protobuf.Timestamp timestamp = 5; // Timestamp of the data point the indicator was computed for
+}
