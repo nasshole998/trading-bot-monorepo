@@ -6,16 +6,27 @@
 #include "indicators/ema.h" // Include EMA header
 #include "data_manager.h" // Need DataManager or mock it
 #include "utils/conversions.h" // Need DecimalLike
+#include "utils/indicator_engine_error.h" // Include error type
 #include <vector>
 #include <deque> // Mock DataManager uses deque
 #include <chrono> // For timestamps
 #include <numeric> // For std::accumulate in mock
+#include <memory> // For unique_ptr
+#include <spdlog/spdlog.h> // For logging
+#include <spdlog/sinks/null_sink.h> // To discard logs during tests
+
 
 // Mock DataManager for testing indicators in isolation
 // This mock provides a simple way to inject historical data.
 class MockDataManager : public IndicatorEngine::DataManager {
 public:
-    MockDataManager() : IndicatorEngine::DataManager(1000) {} // Call base constructor
+    MockDataManager() : IndicatorEngine::DataManager(1000) {
+         // Suppress logging from base class and methods during tests
+         if (!test_logger_) {
+             test_logger_ = spdlog::create<spdlog::sinks::null_sink_mt>("test_logger");
+             spdlog::set_default_logger(test_logger_);
+         }
+     }
 
     // Allow setting mock prices
     void setMockPrices(const std::deque<std::pair<DecimalLike, std::chrono::system_clock::time_point>>& prices) {
@@ -37,10 +48,15 @@ public:
             if (it != symbol_data_.end()) {
                  std::lock_guard<std::mutex> data_lock(it->second->mutex);
                  size_t start_index = 0;
-                if (count > 0 && it->second->recent_prices.size() > count) {
-                    start_index = it->second->recent_prices.size() - count;
+                if (count > 0 && it->second->recent_prices.size() > static_cast<size_t>(count)) {
+                    start_index = it->second->recent_prices.size() - static_cast<size_t>(count);
                 }
-                return std::vector<std::pair<DecimalLike, std::chrono::system_clock::time_point>>(it->second->recent_prices.begin() + start_index, it->second->recent_prices.end());
+                 std::vector<std::pair<DecimalLike, std::chrono::system_clock::time_point>> result;
+                 result.reserve(it->second->recent_prices.size() - start_index);
+                for (size_t i = start_index; i < it->second->recent_prices.size(); ++i) {
+                     result.push_back(it->second->recent_prices[i]);
+                }
+                return result;
             }
         }
         return {}; // Return empty for other symbols or if mock data not set
@@ -73,10 +89,26 @@ public:
          return std::nullopt; // Latest price not set
      }
 
-     // Mocking other methods if needed for indicator computation
-     // void processMarketDataEvent(...) {} // No-op for mock
-     // void storeAndPublishIndicatorValue(...) {} // No-op for mock publishing
+      // Override getLatestPrice
+     std::optional<DecimalLike> getLatestPrice(const std::string& symbol) const override {
+         auto latest_pair = getLatestPriceWithTimestamp(symbol);
+         if (latest_pair) {
+             return latest_pair->first;
+         }
+         return std::nullopt;
+     }
+
+     // Override methods called during processing/publishing if testing full flow
+     // VoidResult processMarketDataEvent(...) override { return IndicatorEngine::Error::IndicatorEngineErrc::Success; }
+     // void storeAndPublishIndicatorValue(...) override {} // No-op for mock publishing
+
+private:
+     // Use a null logger for tests
+     static std::shared_ptr<spdlog::logger> test_logger_;
 };
+
+// Initialize the static logger pointer
+std::shared_ptr<spdlog::logger> MockDataManager::test_logger_ = nullptr;
 
 
 // Test fixture for indicator tests
@@ -86,7 +118,13 @@ protected:
     std::string test_symbol = "TEST_SYMBOL";
 
     void SetUp() override {
+        // Ensure default logger is set for tests if it wasn't already
+         if (!spdlog::default_logger()) {
+             auto null_sink = std::make_shared<spdlog::sinks::null_sink_mt>();
+             spdlog::set_default_logger(std::make_shared<spdlog::logger>("test_logger_setup", null_sink));
+         }
         // Setup code if needed before each test
+        mock_data_manager.setMockPrices({}); // Clear mock data before each test
     }
 
     void TearDown() override {
@@ -99,7 +137,7 @@ protected:
         auto now = std::chrono::system_clock::now();
         for (size_t i = 0; i < prices.size(); ++i) {
             // Add a small delay for distinct timestamps
-            sequence.push_back({prices[i], now + std::chrono::seconds(i)});
+            sequence.push_back({prices[i], now + std::chrono::milliseconds(i * 100)});
         }
         return sequence;
     }
@@ -150,40 +188,37 @@ TEST_F(IndicatorTest, EMACalculation) {
     // Data point 4 (price 16): EMA = (16 - 12.0) * 0.5 + 12.0 = 4.0 * 0.5 + 12.0 = 2.0 + 12.0 = 14.0
     // Data point 5 (price 18): EMA = (18 - 14.0) * 0.5 + 14.0 = 4.0 * 0.5 + 14.0 = 2.0 + 14.0 = 16.0
 
-    std::deque<std::pair<DecimalLike, std::chrono::system_clock::time_point>> prices;
+    std::vector<DecimalLike> prices_vec = {10.0, 12.0, 14.0, 16.0, 18.0};
+    std::deque<std::pair<DecimalLike, std::chrono::system_clock::time_point>> price_sequence;
     auto now = std::chrono::system_clock::now();
 
-    // First price (10) - not enough for init
-    prices.push_back({10.0, now});
-    mock_data_manager.setMockPrices(prices);
-    bool computed = ema.compute(mock_data_manager, &output_value);
-    ASSERT_FALSE(computed);
+    // Feed sequentially
+    for (size_t i = 0; i < prices_vec.size(); ++i) {
+        price_sequence.push_back({prices_vec[i], now + std::chrono::seconds(i)});
+        mock_data_manager.setMockPrices(price_sequence); // Set increasing history
+        bool computed = ema.compute(mock_data_manager, &output_value);
 
-    // Second price (12) - not enough for init
-    prices.push_back({12.0, now + std::chrono::seconds(1)});
-    mock_data_manager.setMockPrices(prices);
-    computed = ema.compute(mock_data_manager, &output_value);
-    ASSERT_FALSE(computed);
-
-    // Third price (14) - enough for initial SMA
-    prices.push_back({14.0, now + std::chrono::seconds(2)});
-    mock_data_manager.setMockPrices(prices);
-    computed = ema.compute(mock_data_manager, &output_value);
-    ASSERT_FALSE(computed); // Should compute initial, but not output final EMA yet
-
-    // Fourth price (16) - enough for first smoothed EMA
-    prices.push_back({16.0, now + std::chrono::seconds(3)});
-    mock_data_manager.setMockPrices(prices);
-    computed = ema.compute(mock_data_manager, &output_value);
-    ASSERT_TRUE(computed);
-    EXPECT_DOUBLE_EQ(output_value, 14.0); // (16 - 12) * 0.5 + 12 = 14
-
-    // Fifth price (18) - second smoothed EMA
-    prices.push_back({18.0, now + std::chrono::seconds(4)});
-    mock_data_manager.setMockPrices(prices);
-    computed = ema.compute(mock_data_manager, &output_value);
-    ASSERT_TRUE(computed);
-    EXPECT_DOUBLE_EQ(output_value, 16.0); // (18 - 14) * 0.5 + 14 = 16
+        // First 2 data points (indices 0, 1): not enough for init
+        if (i < 2) {
+            ASSERT_FALSE(computed);
+        }
+        // 3rd data point (index 2, price 14): enough for initial SMA
+        else if (i == 2) {
+            ASSERT_TRUE(computed); // Initial value is returned by compute
+             // The initial EMA(3) is SMA(3) of {10, 12, 14} which is 12.0
+             EXPECT_DOUBLE_EQ(output_value, 12.0);
+        }
+        // 4th data point (index 3, price 16): first smoothed EMA
+         else if (i == 3) {
+            ASSERT_TRUE(computed);
+            EXPECT_DOUBLE_EQ(output_value, 14.0); // (16 - 12.0) * 0.5 + 12.0 = 14.0
+        }
+        // 5th data point (index 4, price 18): second smoothed EMA
+        else if (i == 4) {
+            ASSERT_TRUE(computed);
+            EXPECT_DOUBLE_EQ(output_value, 16.0); // (18 - 14.0) * 0.5 + 14.0 = 16.0
+        }
+    }
 }
 
 
@@ -193,7 +228,6 @@ TEST_F(IndicatorTest, RSICalculation) {
     Indicators::RSI rsi(config);
     DecimalLike output_value;
 
-    // Prices to test initial averages and smoothing
     // Prices: 10, 11, 12, 11, 13, 14
     // Period 3 -> need 4 prices for initial avg (10, 11, 12, 11)
     // Diffs: +1, +1, -1
@@ -205,21 +239,22 @@ TEST_F(IndicatorTest, RSICalculation) {
     // RS = (10/9) / (2/9) = 10/2 = 5
     // RSI = 100 - (100 / (1 + 5)) = 100 - 100/6 = 100 - 16.666... = 83.333...
 
-    std::vector<DecimalLike> prices = {10.0, 11.0, 12.0, 11.0, 13.0, 14.0};
+    std::vector<DecimalLike> prices_vec = {10.0, 11.0, 12.0, 11.0, 13.0, 14.0};
     std::deque<std::pair<DecimalLike, std::chrono::system_clock::time_point>> price_sequence;
     auto now = std::chrono::system_clock::now();
 
+
     // Feed sequentially
-    for (size_t i = 0; i < prices.size(); ++i) {
-        price_sequence.push_back({prices[i], now + std::chrono::seconds(i)});
+    for (size_t i = 0; i < prices_vec.size(); ++i) {
+        price_sequence.push_back({prices_vec[i], now + std::chrono::seconds(i)});
         mock_data_manager.setMockPrices(price_sequence); // Set increasing history
         bool computed = rsi.compute(mock_data_manager, &output_value);
 
-        // First 3 data points: not enough for initial averages
+        // First 3 data points (indices 0, 1, 2): not enough for initial averages
         if (i < 3) {
             ASSERT_FALSE(computed);
         }
-        // 4th data point (index 3, price 11): enough for initial averages (10,11,12,11). Should compute initial, not final RSI.
+        // 4th data point (index 3, price 11): enough for initial averages (uses prices 10,11,12,11). Should compute initial, not final RSI.
         else if (i == 3) {
             ASSERT_FALSE(computed); // Initial averages computed, but not final RSI yet
         }
@@ -227,19 +262,13 @@ TEST_F(IndicatorTest, RSICalculation) {
          else if (i == 4) {
             ASSERT_TRUE(computed);
             // Expected RSI = 83.333...
-            EXPECT_NEAR(output_value, 83.3333333, 1e-6);
+            EXPECT_NEAR(output_value, 83.333333333, 1e-9); // Use higher precision for comparison
          }
          // 6th data point (index 5, price 14): second smoothed RSI.
          else if (i == 5) {
             ASSERT_TRUE(computed);
-             // Previous Avg Gain = 10/9, Avg Loss = 2/9
-             // Current Price 14, Last Price 13, Diff +1
-             // Current Gain = 1, Current Loss = 0
-             // New Avg Gain = (10/9 * 2 + 1) / 3 = (20/9 + 9/9) / 3 = (29/9)/3 = 29/27
-             // New Avg Loss = (2/9 * 2 + 0) / 3 = (4/9)/3 = 4/27
-             // RS = (29/27) / (4/27) = 29/4 = 7.25
-             // RSI = 100 - (100 / (1 + 7.25)) = 100 - (100 / 8.25) = 100 - 12.1212... = 87.8787...
-            EXPECT_NEAR(output_value, 87.8787878, 1e-6);
+             // Expected RSI = 87.8787...
+            EXPECT_NEAR(output_value, 87.878787878, 1e-9); // Use higher precision for comparison
          }
     }
 }
@@ -252,52 +281,70 @@ TEST_F(IndicatorTest, MACDCalculation) {
 
     // Simulate sequential data points
     // Need enough data for Slow EMA (5 prices) + Signal EMA init (2 MACD values after Slow EMA is ready)
-    // Total prices needed = 5 (for Slow EMA init) + 2 - 1 (for Signal EMA init after Slow is ready) = 6 prices ?
-    // Let's use a sequence and check when values are computed.
+    // Slow EMA needs 5 prices for init SMA. Fast EMA needs 3 prices for init SMA.
+    // Fast EMA ready after 3 prices. Slow EMA after 5 prices.
+    // MACD line = FastEMA - SlowEMA. MACD line ready after 5 prices.
+    // Signal EMA needs 2 MACD values for init SMA.
+    // So, MACD, Signal, Hist should be computed starting from price index 5 (6th price).
 
+    // Using a sequence of prices and calculating expected values using a reference MACD calculator or manual calc
     // Prices: 10, 11, 12, 13, 14, 15, 16, 17, 18
     // EMA(3) alpha = 0.5
     // EMA(5) alpha = 2/6 = 1/3
     // EMA(2) alpha = 2/3 (for signal)
 
-    std::vector<DecimalLike> prices = {10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0};
+    std::vector<DecimalLike> prices_vec = {10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0};
      std::deque<std::pair<DecimalLike, std::chrono::system_clock::time_point>> price_sequence;
     auto now = std::chrono::system_clock::now();
 
-
     // Feed sequentially
-    for (size_t i = 0; i < prices.size(); ++i) {
-        price_sequence.push_back({prices[i], now + std::chrono::seconds(i)});
+    for (size_t i = 0; i < prices_vec.size(); ++i) {
+        price_sequence.push_back({prices_vec[i], now + std::chrono::seconds(i)});
         mock_data_manager.setMockPrices(price_sequence);
         bool computed = macd.compute(mock_data_manager, &macd_line, &signal_line, &histogram);
 
-        // Need enough prices for Slow EMA (period 5) to be initialized, then enough MACD values (period 2)
-        // Slow EMA needs 5 prices for init SMA. Fast EMA needs 3 prices for init SMA.
-        // Fast EMA is ready after 3 prices. Slow EMA after 5 prices.
-        // MACD line = FastEMA - SlowEMA. MACD line ready after 5 prices.
-        // Signal EMA needs 2 MACD values for init SMA.
-        // So, need 5 prices + 2 prices = 7 prices? Let's check indices.
-        // Price index 0,1,2: No Fast/Slow EMA.
-        // Price index 3: Fast EMA init done (uses 0,1,2).
-        // Price index 4: Slow EMA init done (uses 0,1,2,3,4). Fast EMA smoothed. MACD line computed (index 4).
-        // Price index 5: Need 2nd MACD value (index 5) for Signal EMA init. MACD line computed (index 5). Signal EMA init done (uses MACD values at index 4 and 5). Histogram computed.
-        // So, MACD, Signal, Hist should be computed starting from price index 5 (6th price).
-
         if (i < 5) {
-            ASSERT_FALSE(computed); // Not enough data for MACD line yet
+            // Not enough data for MACD line yet (requires Slow EMA, period 5)
+            ASSERT_FALSE(computed);
         } else if (i == 5) {
-             // Should compute MACD line (based on price 5) and Signal/Hist (based on MACD values at index 4, 5)
+             // MACD line ready (index 5 price), but Signal EMA might not be ready yet (needs 2 MACD values)
+             // MACD line value at index 5 is based on EMA(3) and EMA(5) up to index 5.
+             // Signal EMA requires MACD line values at indices 4 and 5 for its initial SMA.
+             // So, Signal/Hist are computed at index 5.
              ASSERT_TRUE(computed);
-             // TODO: Calculate expected values manually or using a reference library
-             // This is complex calculation, trust the logic structure for now and rely on reference library tests.
-              std::cout << "MACD computed at index " << i << ": MACD=" << macd_line << ", Signal=" << signal_line << ", Hist=" << histogram << std::endl; // Debug
-         } else {
-             ASSERT_TRUE(computed); // Should compute
-             std::cout << "MACD computed at index " << i << ": MACD=" << macd_line << ", Signal=" << signal_line << ", Hist=" << histogram << std::endl; // Debug
+             // TODO: Calculate expected values manually or using a reference library for prices 10..15, MACD(3,5,2)
+             // Example trace (simplified calculation assuming standard EMA):
+             // i=0..2: No EMA(3), No EMA(5)
+             // i=2 (P=12): EMA(3) init = (10+11+12)/3 = 11.0
+             // i=3 (P=13): EMA(3) = (13 - 11.0)*0.5 + 11.0 = 12.0
+             // i=4 (P=14): EMA(3) = (14 - 12.0)*0.5 + 12.0 = 13.0, EMA(5) init = (10+11+12+13+14)/5 = 12.0
+             // MACD line (i=4) = 13.0 - 12.0 = 1.0. History: [1.0]
+             // i=5 (P=15): EMA(3) = (15 - 13.0)*0.5 + 13.0 = 14.0, EMA(5) = (15 - 12.0)*(1/3) + 12.0 = 3*1/3 + 12 = 13.0
+             // MACD line (i=5) = 14.0 - 13.0 = 1.0. History: [1.0, 1.0]
+             // Signal EMA(2) init = SMA(2) of MACD history {1.0, 1.0} = (1.0+1.0)/2 = 1.0. Signal=1.0
+             // Histogram (i=5) = MACD - Signal = 1.0 - 1.0 = 0.0
+             EXPECT_NEAR(macd_line, 1.0, 1e-9);
+             EXPECT_NEAR(signal_line, 1.0, 1e-9);
+             EXPECT_NEAR(histogram, 0.0, 1e-9);
+
+         } else if (i == 6) {
+             // MACD line ready (index 6 price), Signal/Hist computed (based on MACD values at index 5, 6)
+             ASSERT_TRUE(computed);
+              // i=6 (P=16): EMA(3) = (16 - 14.0)*0.5 + 14.0 = 15.0, EMA(5) = (16 - 13.0)*(1/3) + 13.0 = 3*1/3 + 13 = 14.0
+              // MACD line (i=6) = 15.0 - 14.0 = 1.0. History: [1.0, 1.0] (Pop 1.0 from front, Push 1.0 to back)
+              // Signal EMA(2) = (MACD[i=6] - Signal[i=5]) * alpha_signal + Signal[i=5]
+              // Signal EMA(2) alpha = 2/3
+              // Signal EMA = (1.0 - 1.0)*(2/3) + 1.0 = 1.0
+              // Histogram = MACD - Signal = 1.0 - 1.0 = 0.0
+              EXPECT_NEAR(macd_line, 1.0, 1e-9);
+              EXPECT_NEAR(signal_line, 1.0, 1e-9);
+              EXPECT_NEAR(histogram, 0.0, 1e-9);
          }
+         // Note: MACD values seem constant here because price diffs are constant (1.0)
+         // A better test would use a more varied price sequence.
     }
 }
 
-// TODO: Add more test cases for edge cases, different periods, zero values, etc.
+// TODO: Add more test cases for edge cases, different periods, zero values, NaN handling, etc.
 // TODO: Add tests for DataManager methods (getRecentPrices, getNewIndicatorValues)
 // TODO: Add integration tests for gRPC (more complex)

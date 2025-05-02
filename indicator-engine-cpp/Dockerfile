@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libeigen3-dev \
     libyaml-cpp-dev \
     libasio-dev \
+    libspdlog-dev \
     # libtalib-dev # Uncomment if using TA-Lib from package manager
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,7 +30,7 @@ COPY proto/ ./proto/
 COPY indicator-engine-cpp/CMakeLists.txt ./CMakeLists.txt
 COPY indicator-engine-cpp/include/ ./include/
 COPY indicator-engine-cpp/src/ ./src/
-COPY indicator-engine-cpp/tests/ ./tests/ 
+COPY indicator-engine-cpp/tests/ ./tests/
 
 # Configure and build with CMake
 RUN cmake -B build \
@@ -62,6 +63,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g \
     libyaml-cpp0.7 \
     libasio-dev \
+    libspdlog-dev \
     # libtalib0 # Uncomment if TA-Lib runtime is needed
     && rm -rf /var/lib/apt/lists/*
 

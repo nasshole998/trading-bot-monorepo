@@ -29,12 +29,14 @@ pkgs.mkShell {
     # Asio
     pkgs.asio
 
+    # spdlog
+    pkgs.spdlog
+
     # Optional: TA-Lib (if using)
     # pkgs.ta-lib
 
     # Optional: Google Test (for writing tests)
-    # pkgs.googletest
-
+    pkgs.googletest # Include googletest for the test placeholder
   ];
 
   # Define a shell hook to run commands when entering the shell

@@ -42,6 +42,10 @@ message(STATUS "Using yaml-cpp: ${YAMLCPP_LIBRARIES}")
 find_package(asio REQUIRED) # Assumes Asio is installed or found by find_package
 message(STATUS "Using Asio: ${asio_LIBRARIES}")
 
+# Find spdlog for logging
+find_package(spdlog REQUIRED)
+message(STATUS "Using spdlog: ${spdlog_LIBRARIES}")
+
 
 # --- Protobuf and gRPC Compilation ---
 set(PROTO_DIR "${CMAKE_SOURCE_DIR}/../../proto") # Adjust path
@@ -81,8 +85,10 @@ set(CPP_SRCS
     src/indicators/sma.cpp
     src/indicators/rsi.cpp
     src/indicators/macd.cpp
+    src/indicators/ema.cpp
     src/utils/conversions.cpp
     src/health_check.cpp # Health check implementation
+    # spdlog is header-only, no .cpp needed usually
 )
 
 # List CUDA source files
@@ -104,6 +110,7 @@ target_include_directories(indicator_engine PUBLIC
     ${yaml-cpp_INCLUDE_DIRS}            # yaml-cpp includes
     ${asio_INCLUDE_DIR}                 # Asio includes
     ${CUDA_INCLUDE_DIRS}                # CUDA includes
+    ${spdlog_INCLUDE_DIRS}              # spdlog includes
 )
 
 # --- Link Libraries ---
@@ -115,6 +122,7 @@ target_link_libraries(indicator_engine PUBLIC
     ${yaml-cpp_LIBRARIES}        # yaml-cpp libraries
     ${asio_LIBRARIES}            # Asio libraries
     ${CUDA_LIBRARIES}            # Link CUDA runtime libraries
+    ${spdlog_LIBRARIES}          # spdlog libraries
     # Optional: Link Google Test if building tests with main executable (less common)
 )
 
@@ -133,8 +141,9 @@ target_link_libraries(indicator_tests PUBLIC
     ${yaml-cpp_LIBRARIES}
     ${asio_LIBRARIES}
     ${CUDA_LIBRARIES}
+    ${spdlog_LIBRARIES} # Link spdlog for tests
     # Add your testing framework here, e.g:
-    # find_package(GTest CONFIG REQUIRED)
-    # GTest::gmock_main # Or GTest::gtest_main depending on your test structure
+    find_package(GTest CONFIG REQUIRED)
+    GTest::gmock_main # Or GTest::gtest_main depending on your test structure
 )
 # configure_test(indicator_tests ...) # Configure test properties if using CTest

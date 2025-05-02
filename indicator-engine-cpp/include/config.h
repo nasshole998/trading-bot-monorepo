@@ -7,6 +7,8 @@
 #include "indicators/sma.h" // Include indicator config types
 #include "indicators/rsi.h"
 #include "indicators/macd.h"
+#include "indicators/ema.h" // Include EMA config type
+#include "utils/indicator_engine_error.h" // Include custom error type
 
 // Configuration structures
 struct GrpcConfig {
@@ -28,23 +30,31 @@ struct Config {
     std::vector<Indicators::SmaConfig> sma_configs;
     std::vector<Indicators::RsiConfig> rsi_configs;
     std::vector<Indicators::MacdConfig> macd_configs;
+    std::vector<Indicators::EmaConfig> ema_configs;
     // Add vectors for other indicator configs
 
     // Method to load configuration from a file (e.g., YAML)
-    void load(const std::string& filepath);
-};
+    // Returns VoidResult indicating success or failure with error code
+    IndicatorEngine::VoidResult load(const std::string& filepath);
 
-// Helper functions to parse indicator configs from YAML
-namespace YAML {
-    template<> struct convert<Indicators::SmaConfig> {
-        static bool decode(const Node& node, Indicators::SmaConfig& config);
-    };
-     template<> struct convert<Indicators::RsiConfig> {
-        static bool decode(const Node& node, Indicators::RsiConfig& config);
-    };
-     template<> struct convert<Indicators::MacdConfig> {
-        static bool decode(const Node& node, Indicators::MacdConfig& config);
-    };
-}
+private:
+    // Helper functions to parse indicator configs from YAML
+    // These return bool indicating success/failure directly as required by YAML-CPP
+    // Validation *after* parsing is done in Config::load
+    namespace YAML {
+        template<> struct convert<Indicators::SmaConfig> {
+            static bool decode(const Node& node, Indicators::SmaConfig& config);
+        };
+         template<> struct convert<Indicators::RsiConfig> {
+            static bool decode(const Node& node, Indicators::RsiConfig& config);
+        };
+         template<> struct convert<Indicators::MacdConfig> {
+            static bool decode(const Node& node, Indicators::MacdConfig& config);
+        };
+         template<> struct convert<Indicators::EmaConfig> {
+            static bool decode(const Node& node, Indicators::EmaConfig& config);
+        };
+    }
+};
 
 #endif // INDICATOR_ENGINE_CONFIG_H

@@ -1,16 +1,15 @@
 #include "health_check.h"
-#include <iostream>
-#include <string>
-#include <vector>
-#include <asio.hpp> // Using Asio for basic socket
-#include <chrono> // For std::chrono::seconds
-#include <thread> // For std::this_thread::sleep_for
+#include <asio.hpp>
+#include <chrono>
+#include <thread>
+#include <spdlog/spdlog.h> // For logging
+#include <vector> // Needed by Asio headers sometimes
 
 namespace IndicatorEngine {
 
 // Simple HTTP health check server implementation using Asio
 void start_health_check_server(const std::string& listen_address, const std::atomic<bool>& stop_flag) {
-    std::cout << "Starting Health Check server on " << listen_address << " (Asio)..." << std::endl;
+    spdlog::info("Starting Health Check server on {} (Asio)...", listen_address);
 
     try {
         asio::io_context io_context;
@@ -28,13 +27,13 @@ void start_health_check_server(const std::string& listen_address, const std::ato
 
         asio::ip::tcp::acceptor acceptor(io_context, endpoint);
 
-        std::cout << "Health Check server listening on " << acceptor.local_endpoint() << std::endl;
+        spdlog::info("Health Check server listening on {}", acceptor.local_endpoint());
 
         // Set acceptor to non-blocking mode for graceful shutdown
         std::error_code ec_nonblock;
         acceptor.non_blocking(true, ec_nonblock);
          if (ec_nonblock) {
-             std::cerr << "Failed to set non-blocking mode for health check acceptor: " << ec_nonblock.message() << std::endl;
+             spdlog::error("Failed to set non-blocking mode for health check acceptor: {}", ec_nonblock.message());
              return; // Exit thread on failure
          }
 
@@ -54,10 +53,11 @@ void start_health_check_server(const std::string& listen_address, const std::ato
                 std::error_code ec_write;
                 asio::write(socket, asio::buffer(http_response), ec_write);
                  if (ec_write) {
-                   std::cerr << "Error writing health check response: " << ec_write.message() << std::endl;
+                   spdlog::error("Error writing health check response: {}", ec_write.message());
                  }
-                 socket.shutdown(asio::ip::tcp::socket::shutdown_both, ec_accept); // Use ec_accept for shutdown
-                 socket.close(ec_accept); // Use ec_accept for close
+                 std::error_code ec_close; // Use a new error code for close operations
+                 socket.shutdown(asio::ip::tcp::socket::shutdown_both, ec_close);
+                 socket.close(ec_close);
 
             } else if (ec_accept == asio::error::would_block) {
                 // No pending connection, continue the loop
@@ -65,7 +65,7 @@ void start_health_check_server(const std::string& listen_address, const std::ato
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             } else {
                 // A real error occurred during accept
-                std::cerr << "Health check accept error: " << ec_accept.message() << std::endl;
+                spdlog::error("Health check accept error: {}", ec_accept.message());
                 // Depending on error, might break loop or continue
                 std::this_thread::sleep_for(std::chrono::seconds(1)); // Sleep before retrying accept
             }
@@ -75,14 +75,14 @@ void start_health_check_server(const std::string& listen_address, const std::ato
         std::error_code ec_close;
         acceptor.close(ec_close);
          if (ec_close) {
-             std::cerr << "Error closing health check acceptor: " << ec_close.message() << std::endl;
+             spdlog::error("Error closing health check acceptor: {}", ec_close.message());
          }
 
     } catch (const std::exception& e) {
-        std::cerr << "Health Check server error: " << e.what() << std::endl;
+        spdlog::error("Health Check server error: {}", e.what());
     }
 
-    std::cout << "Health Check server stopped." << std::endl;
+    spdlog::info("Health Check server stopped.");
 }
 
 } // namespace IndicatorEngine

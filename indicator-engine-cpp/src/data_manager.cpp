@@ -1,13 +1,15 @@
 #include "data_manager.h"
 #include "utils/conversions.h"
+#include "utils/indicator_engine_error.h"
 #include "indicators/sma.h"
 #include "indicators/rsi.h"
 #include "indicators/macd.h"
 #include "indicators/ema.h"
-#include <iostream> // For debug output
-#include <algorithm> // For std::min
+#include <algorithm> // For std::min, std::find
 #include <cmath> // For std::isnan
 #include <numeric> // For std::accumulate
+#include <sstream> // For building indicator key string
+#include <spdlog/spdlog.h> // For logging
 
 
 namespace IndicatorEngine {
@@ -15,37 +17,39 @@ namespace IndicatorEngine {
 DataManager::DataManager(int max_history_size) : max_history_size_(max_history_size) {
     if (max_history_size_ <= 0) {
         max_history_size_ = 1000; // Default if invalid size provided
+        spdlog::warn("DataManager: Invalid max_history_size provided, defaulting to {}", max_history_size_);
     }
-    std::cout << "DataManager initialized with max history size: " << max_history_size_ << std::endl;
+    spdlog::info("DataManager initialized with max history size: {}", max_history_size_);
 }
 
 DataManager::~DataManager() {
-    // Destructor
-    std::cout << "DataManager destroying." << std::endl;
+    spdlog::info("DataManager destroying.");
     // Ensure all subscribers are removed? Or rely on ServiceImpl destructor?
     // The ServiceImpl destructor should remove subscribers from DataManager.
 }
 
 
-void DataManager::processMarketDataEvent(const market_data::MarketDataEvent& event) {
+VoidResult DataManager::processMarketDataEvent(const market_data::MarketDataEvent& event) {
     std::string symbol;
-    std::optional<DecimalLike> price_opt;
+    IndicatorEngine::Result<DecimalLike> price_result = IndicatorEngine::Error::IndicatorEngineErrc::DataNotAvailable; // Use Result
     std::chrono::system_clock::time_point timestamp;
 
     if (event.has_trade()) {
         const auto& trade = event.trade();
         symbol = trade.symbol();
-        price_opt = Utils::Conversions::StringToDecimalLike(trade.price());
+        price_result = Utils::Conversions::StringToDecimalLike(trade.price());
         timestamp = Utils::Conversions::ProtoTimestampToTimePoint(trade.timestamp());
         // Add trade to history if needed directly by some indicator
     } else if (event.has_quote()) {
         const auto& quote = event.quote();
         symbol = quote.symbol();
         // Use midpoint price?
-        auto bid_opt = Utils::Conversions::StringToDecimalLike(quote.bid_price());
-        auto ask_opt = Utils::Conversions::StringToDecimalLike(quote.ask_price());
-        if (bid_opt && ask_opt) {
-             price_opt = (bid_opt.value() + ask_opt.value()) / 2.0; // Example: use midpoint
+        auto bid_result = Utils::Conversions::StringToDecimalLike(quote.bid_price());
+        auto ask_result = Utils::Conversions::StringToDecimalLike(quote.ask_price());
+        if (bid_result.has_value() && ask_result.has_value()) {
+             price_result = (bid_result.value() + ask_result.value()) / 2.0; // Example: use midpoint
+        } else {
+             price_result = IndicatorEngine::Error::IndicatorEngineErrc::ConversionError;
         }
         timestamp = Utils::Conversions::ProtoTimestampToTimePoint(quote.timestamp());
         // Add quote to history if needed
@@ -53,28 +57,31 @@ void DataManager::processMarketDataEvent(const market_data::MarketDataEvent& eve
         const auto& ob_update = event.order_book_update();
         symbol = ob_update.symbol();
          if (!ob_update.bids().empty() && !ob_update.asks().empty()) {
-             auto best_bid_opt = Utils::Conversions::StringToDecimalLike(ob_update.bids(0).price());
-             auto best_ask_opt = Utils::Conversions::StringToDecimalLike(ob_update.asks(0).price());
-             if (best_bid_opt && best_ask_opt) {
-                 price_opt = (best_bid_opt.value() + best_ask_opt.value()) / 2.0;
+             auto best_bid_result = Utils::Conversions::StringToDecimalLike(ob_update.bids(0).price());
+             auto best_ask_result = Utils::Conversions::StringToDecimalLike(ob_update.asks(0).price());
+             if (best_bid_result.has_value() && best_ask_result.has_value()) {
+                 price_result = (best_bid_result.value() + best_ask_result.value()) / 2.0;
+             } else {
+                 price_result = IndicatorEngine::Error::IndicatorEngineErrc::ConversionError;
              }
+         } else {
+             price_result = IndicatorEngine::Error::IndicatorEngineErrc::DataNotAvailable; // No bids/asks in update
          }
         timestamp = Utils::Conversions::ProtoTimestampToTimePoint(ob_update.timestamp());
         // Need to manage order book state if full depth is required by indicators
     } else {
         // Unhandled event type
-        // std::cerr << "Received unhandled market data event type." << std::endl;
-        return;
+        spdlog::debug("Received unhandled market data event type.");
+        return IndicatorEngine::Error::IndicatorEngineErrc::InvalidInputData;
     }
 
     if (symbol.empty()) {
-         // std::cerr << "Received market data event with empty symbol." << std::endl;
-         return;
+         spdlog::warn("Received market data event with empty symbol.");
+         return IndicatorEngine::Error::IndicatorEngineErrc::InvalidInputData;
     }
-    if (!price_opt) {
-         // Conversion failed or no price in event
-         // std::cerr << "Could not extract valid price from market data event for symbol: " << symbol << std::endl;
-         return;
+    if (price_result.has_error()) {
+         spdlog::warn("Could not extract valid price from market data event for symbol {}: {}", symbol, price_result.error().message());
+         return price_result.error(); // Return the underlying error
     }
 
 
@@ -83,7 +90,7 @@ void DataManager::processMarketDataEvent(const market_data::MarketDataEvent& eve
     {
         std::lock_guard<std::mutex> map_lock(symbol_data_mutex_);
         if (symbol_data_.find(symbol) == symbol_data_.end()) {
-            std::cout << "Creating SymbolData for: " << symbol << std::endl;
+            spdlog::info("Creating SymbolData for: {}", symbol);
             symbol_data_[symbol] = std::make_unique<SymbolData>();
             symbol_data_[symbol]->symbol = symbol;
         }
@@ -93,15 +100,17 @@ void DataManager::processMarketDataEvent(const market_data::MarketDataEvent& eve
     // Add price and timestamp to history
     {
         std::lock_guard<std::mutex> data_lock((*symbol_data_ptr)->mutex);
-        (*symbol_data_ptr)->recent_prices.push_back({price_opt.value(), timestamp});
-        if ((*symbol_data_ptr)->recent_prices.size() > max_history_size_) {
+        (*symbol_data_ptr)->recent_prices.push_back({price_result.value(), timestamp});
+        if ((*symbol_data_ptr)->recent_prices.size() > static_cast<size_t>(max_history_size_)) {
             (*symbol_data_ptr)->recent_prices.pop_front();
         }
-        // std::cout << "Added price for " << symbol << ", history size: " << (*symbol_data_ptr)->recent_prices.size() << std::endl; // Debug
+        // spdlog::trace("Added price for {}, history size: {}", symbol, (*symbol_data_ptr)->recent_prices.size());
     }
 
     // Trigger indicator computation for this symbol
     triggerIndicatorComputation(symbol);
+
+    return IndicatorEngine::Error::IndicatorEngineErrc::Success; // Indicate successful processing
 }
 
 std::optional<std::pair<DecimalLike, std::chrono::system_clock::time_point>> DataManager::getLatestPriceWithTimestamp(const std::string& symbol) const {
@@ -111,6 +120,18 @@ std::optional<std::pair<DecimalLike, std::chrono::system_clock::time_point>> Dat
          std::lock_guard<std::mutex> data_lock(it->second->mutex);
          if (!it->second->recent_prices.empty()) {
              return it->second->recent_prices.back(); // Return the pair
+         }
+     }
+     return std::nullopt; // Symbol not found or no price data
+}
+
+std::optional<DecimalLike> DataManager::getLatestPrice(const std::string& symbol) const {
+     std::lock_guard<std::mutex> map_lock(symbol_data_mutex_);
+     auto it = symbol_data_.find(symbol);
+     if (it != symbol_data_.end()) {
+         std::lock_guard<std::mutex> data_lock(it->second->mutex);
+         if (!it->second->recent_prices.empty()) {
+             return it->second->recent_prices.back().first; // Return only the price
          }
      }
      return std::nullopt; // Symbol not found or no price data
@@ -126,9 +147,10 @@ std::vector<DecimalLike> DataManager::getRecentPrices(const std::string& symbol,
      if (it != symbol_data_.end()) {
          std::lock_guard<std::mutex> data_lock(it->second->mutex);
          size_t start_index = 0;
-         if (it->second->recent_prices.size() > count) {
-             start_index = it->second->recent_prices.size() - count;
+         if (it->second->recent_prices.size() > static_cast<size_t>(count)) {
+             start_index = it->second->recent_prices.size() - static_cast<size_t>(count);
          }
+         prices.reserve(it->second->recent_prices.size() - start_index); // Reserve space
          for (size_t i = start_index; i < it->second->recent_prices.size(); ++i) {
              prices.push_back(it->second->recent_prices[i].first); // Get only the price
          }
@@ -145,9 +167,10 @@ std::vector<std::pair<DecimalLike, std::chrono::system_clock::time_point>> DataM
      if (it != symbol_data_.end()) {
          std::lock_guard<std::mutex> data_lock(it->second->mutex);
          size_t start_index = 0;
-         if (it->second->recent_prices.size() > count) {
-             start_index = it->second->recent_prices.size() - count;
+         if (it->second->recent_prices.size() > static_cast<size_t>(count)) {
+             start_index = it->second->recent_prices.size() - static_cast<size_t>(count);
          }
+         price_timestamps.reserve(it->second->recent_prices.size() - start_index); // Reserve space
          for (size_t i = start_index; i < it->second->recent_prices.size(); ++i) {
              price_timestamps.push_back(it->second->recent_prices[i]); // Get the pair
          }
@@ -157,70 +180,74 @@ std::vector<std::pair<DecimalLike, std::chrono::system_clock::time_point>> DataM
 
 
 // Register indicator instances (takes ownership)
-void DataManager::registerSMA(std::unique_ptr<Indicators::SMA> indicator) {
-    if (!indicator) return;
+VoidResult DataManager::registerSMA(std::unique_ptr<Indicators::SMA> indicator) {
+    if (!indicator) {
+        spdlog::error("DataManager: Attempted to register null SMA indicator.");
+        return IndicatorEngine::Error::IndicatorEngineErrc::InvalidInputData;
+    }
+    // Basic validation from config is in main, but check object state here if needed
     std::lock_guard<std::mutex> lock(calculators_mutex_);
-    std::cout << "Registered SMA: " << indicator->config_.name << " for " << indicator->config_.symbol << " period " << indicator->config_.period << std::endl;
+    spdlog::info("DataManager: Registered SMA: {} for {}", indicator->config_.name, indicator->config_.symbol);
     sma_calculators_.push_back(std::move(indicator));
+    return IndicatorEngine::Error::IndicatorEngineErrc::Success;
 }
 
-void DataManager::registerRSI(std::unique_ptr<Indicators::RSI> indicator) {
-     if (!indicator) return;
+VoidResult DataManager::registerRSI(std::unique_ptr<Indicators::RSI> indicator) {
+     if (!indicator) {
+        spdlog::error("DataManager: Attempted to register null RSI indicator.");
+        return IndicatorEngine::Error::IndicatorEngineErrc::InvalidInputData;
+    }
     std::lock_guard<std::mutex> lock(calculators_mutex_);
-    std::cout << "Registered RSI: " << indicator->config_.name << " for " << indicator->config_.symbol << " period " << indicator->config_.period << std::endl;
+    spdlog::info("DataManager: Registered RSI: {} for {}", indicator->config_.name, indicator->config_.symbol);
     rsi_calculators_.push_back(std::move(indicator));
+    return IndicatorEngine::Error::IndicatorEngineErrc::Success;
 }
 
-void DataManager::registerMACD(std::unique_ptr<Indicators::MACD> indicator) {
-     if (!indicator) return;
+VoidResult DataManager::registerMACD(std::unique_ptr<Indicators::MACD> indicator) {
+     if (!indicator) {
+        spdlog::error("DataManager: Attempted to register null MACD indicator.");
+        return IndicatorEngine::Error::IndicatorEngineErrc::InvalidInputData;
+    }
     std::lock_guard<std::mutex> lock(calculators_mutex_);
-     std::cout << "Registered MACD: " << indicator->config_.name << " for " << indicator->config_.symbol << " (" << indicator->config_.fast_period << "," << indicator->config_.slow_period << "," << indicator->config_.signal_period << ")" << std::endl;
+    spdlog::info("DataManager: Registered MACD: {} for {}", indicator->config_.name, indicator->config_.symbol);
     macd_calculators_.push_back(std::move(indicator));
+    return IndicatorEngine::Error::IndicatorEngineErrc::Success;
 }
 
-void DataManager::registerEMA(std::unique_ptr<Indicators::EMA> indicator) {
-     if (!indicator) return;
+VoidResult DataManager::registerEMA(std::unique_ptr<Indicators::EMA> indicator) {
+     if (!indicator) {
+        spdlog::error("DataManager: Attempted to register null EMA indicator.");
+        return IndicatorEngine::Error::IndicatorEngineErrc::InvalidInputData;
+    }
     std::lock_guard<std::mutex> lock(calculators_mutex_);
-     std::cout << "Registered EMA: " << indicator->config_.name << " for " << indicator->config_.symbol << " period " << indicator->config_.period << std::endl;
+    spdlog::info("DataManager: Registered EMA: {} for {}", indicator->config_.name, indicator->config_.symbol);
     ema_calculators_.push_back(std::move(indicator));
+    return IndicatorEngine::Error::IndicatorEngineErrc::Success;
 }
 
 
 // Internal method to trigger computation for relevant indicators for a given symbol
 void DataManager::triggerIndicatorComputation(const std::string& symbol) {
-    // This method is called after new data arrives for 'symbol'.
-    // Iterate through all registered indicators that match this symbol and compute.
-
-    // The computation itself should not block this thread for too long if it's expensive.
-    // For complex SIMD/GPU or if doing heavy batching, this could queue work for a worker pool.
-    // Currently, indicator->compute() runs synchronously.
-
-    // Note: SIMD/GPU acceleration would likely batch computations *across* symbols or periods,
-    // so triggering per-symbol might not be the final model for highly optimized calculation.
-    // A batching mechanism would collect data for multiple symbols, send to GPU, compute all,
-    // then update results for all.
-
     std::lock_guard<std::mutex> calc_lock(calculators_mutex_); // Lock calculators list
 
     // SMA
-    for (auto& sma_calc : sma_calculators_) { // Use mutable reference for stateful indicators
+    for (auto& sma_calc : sma_calculators_) {
         if (sma_calc->config_.symbol == symbol) {
             DecimalLike value;
             if (sma_calc->compute(*this, &value)) { // Pass reference to DataManager
                 indicator_data::IndicatorValue proto_value;
-                proto_value.set_exchange("binance"); // Assuming binance for now
+                proto_value.set_exchange("binance"); // Assuming binance
                 proto_value.set_symbol(symbol);
                 proto_value.set_indicator_name(sma_calc->config_.name);
                 proto_value.set_value(Utils::Conversions::DecimalLikeToString(value));
 
                 // Get timestamp of the data point the indicator was computed for
-                // This is the timestamp of the *last* data point used (the current one)
                 auto latest_price_ts_opt = getLatestPriceWithTimestamp(symbol);
                 if (latest_price_ts_opt) {
                      *proto_value.mutable_timestamp() = Utils::Conversions::TimePointToProtoTimestamp(latest_price_ts_opt.value().second);
                 } else {
-                     // Fallback timestamp if somehow no price/timestamp found
                      *proto_value.mutable_timestamp() = Utils::Conversions::TimePointToProtoTimestamp(std::chrono::system_clock::now());
+                     spdlog::warn("DataManager: Could not get latest price timestamp for SMA {}. Using current time.", sma_calc->config_.name);
                 }
 
                 storeAndPublishIndicatorValue(std::move(proto_value)); // Store and notify
@@ -229,7 +256,7 @@ void DataManager::triggerIndicatorComputation(const std::string& symbol) {
     }
 
     // EMA
-     for (auto& ema_calc : ema_calculators_) { // Use mutable reference for stateful indicators
+     for (auto& ema_calc : ema_calculators_) {
         if (ema_calc->config_.symbol == symbol) {
             DecimalLike value;
             if (ema_calc->compute(*this, &value)) { // Pass reference to DataManager
@@ -243,6 +270,7 @@ void DataManager::triggerIndicatorComputation(const std::string& symbol) {
                      *proto_value.mutable_timestamp() = Utils::Conversions::TimePointToProtoTimestamp(latest_price_ts_opt.value().second);
                 } else {
                      *proto_value.mutable_timestamp() = Utils::Conversions::TimePointToProtoTimestamp(std::chrono::system_clock::now());
+                      spdlog::warn("DataManager: Could not get latest price timestamp for EMA {}. Using current time.", ema_calc->config_.name);
                 }
 
                 storeAndPublishIndicatorValue(std::move(proto_value)); // Store and notify
@@ -252,7 +280,7 @@ void DataManager::triggerIndicatorComputation(const std::string& symbol) {
 
 
     // RSI
-     for (auto& rsi_calc : rsi_calculators_) { // Use mutable reference for stateful indicators
+     for (auto& rsi_calc : rsi_calculators_) {
         if (rsi_calc->config_.symbol == symbol) {
             DecimalLike value;
             if (rsi_calc->compute(*this, &value)) { // Pass reference to DataManager
@@ -266,6 +294,7 @@ void DataManager::triggerIndicatorComputation(const std::string& symbol) {
                      *proto_value.mutable_timestamp() = Utils::Conversions::TimePointToProtoTimestamp(latest_price_ts_opt.value().second);
                 } else {
                      *proto_value.mutable_timestamp() = Utils::Conversions::TimePointToProtoTimestamp(std::chrono::system_clock::now());
+                      spdlog::warn("DataManager: Could not get latest price timestamp for RSI {}. Using current time.", rsi_calc->config_.name);
                 }
 
                 storeAndPublishIndicatorValue(std::move(proto_value)); // Store and notify
@@ -274,7 +303,7 @@ void DataManager::triggerIndicatorComputation(const std::string& symbol) {
     }
 
     // MACD
-     for (auto& macd_calc : macd_calculators_) { // Use mutable reference for stateful indicators
+     for (auto& macd_calc : macd_calculators_) {
         if (macd_calc->config_.symbol == symbol) {
             DecimalLike macd_line, signal_line, histogram;
             if (macd_calc->compute(*this, &macd_line, &signal_line, &histogram)) { // Pass reference to DataManager
@@ -287,6 +316,7 @@ void DataManager::triggerIndicatorComputation(const std::string& symbol) {
                       timestamp = Utils::Conversions::TimePointToProtoTimestamp(latest_price_ts_opt.value().second);
                  } else {
                       timestamp = Utils::Conversions::TimePointToProtoTimestamp(std::chrono::system_clock::now());
+                       spdlog::warn("DataManager: Could not get latest price timestamp for MACD {}. Using current time.", macd_calc->config_.name);
                  }
 
 
@@ -317,6 +347,7 @@ void DataManager::triggerIndicatorComputation(const std::string& symbol) {
         }
     }
 
+    // Notify subscribers happens in storeAndPublishIndicatorValue
 }
 
 // Internal method to store a computed indicator value and notify subscribers
@@ -326,7 +357,7 @@ void DataManager::storeAndPublishIndicatorValue(indicator_data::IndicatorValue v
         // Lock covers both latest_indicator_values_ and last_sent_timestamps_
         std::lock_guard<std::mutex> lock(latest_values_mutex_);
         latest_indicator_values_[value.symbol()][value.indicator_name()] = value;
-        // std::cout << "Stored latest indicator value: " << value.symbol() << ":" << value.indicator_name() << " = " << value.value() << std::endl; // Debug
+        // spdlog::trace("Stored latest indicator value: {}:{} = {}", value.symbol(), value.indicator_name(), value.value()); // Debug
     }
 
     // Notify subscriber threads waiting on the condition variable
@@ -359,8 +390,7 @@ std::vector<indicator_data::IndicatorValue> DataManager::getNewIndicatorValues(
     std::lock_guard<std::mutex> lock(latest_values_mutex_); // Lock the latest values and subscriber state
 
     // Find or create the subscriber's last sent timestamps map
-    auto& subscriber_timestamps = last_sent_timestamps_[subscriber_id];
-
+    auto& subscriber_timestamps = last_sent_timestamps_[subscriber_id]; // Creates entry if it doesn't exist
 
     // Iterate through the latest stored values
     for (const auto& symbol_pair : latest_indicator_values_) {
@@ -373,7 +403,7 @@ std::vector<indicator_data::IndicatorValue> DataManager::getNewIndicatorValues(
             for (const auto& indicator_pair : symbol_pair.second) {
                 const std::string& current_indicator_name = indicator_pair.first;
                 const auto& indicator_value = indicator_pair.second;
-                 const auto& indicator_timestamp = Utils::Conversions::ProtoTimestampToTimePoint(indicator_value.timestamp());
+                 const auto indicator_timestamp = Utils::Conversions::ProtoTimestampToTimePoint(indicator_value.timestamp());
 
 
                 // Check if indicator name is in subscription (if names list is not empty)
@@ -381,15 +411,20 @@ std::vector<indicator_data::IndicatorValue> DataManager::getNewIndicatorValues(
                                           std::find(request.indicator_names().begin(), request.indicator_names().end(), current_indicator_name) != request.indicator_names().end();
 
                 if (indicator_matches) {
-                    // Check if this value is newer than the last one sent to THIS subscriber for THIS indicator
-                    std::string key = current_symbol + ":" + current_indicator_name;
-                    auto last_sent_it = subscriber_timestamps.find(key);
+                    // Create a unique key for this indicator for this symbol
+                    std::stringstream key_ss;
+                    key_ss << current_symbol << ":" << current_indicator_name;
+                    std::string indicator_key = key_ss.str();
+
+                    // Check if this value is newer than the last one sent to THIS subscriber for THIS indicator key
+                    auto last_sent_it = subscriber_timestamps.find(indicator_key);
 
                     bool is_newer = true; // Assume newer if never sent before
                     if (last_sent_it != subscriber_timestamps.end()) {
                          // Compare current indicator value's timestamp with the last sent timestamp
+                         // Use >= to handle cases where multiple updates happen within the same timestamp
                          if (indicator_timestamp <= last_sent_it->second) {
-                             is_newer = false; // Not newer than the last one sent
+                             is_newer = false; // Not strictly newer than the last one sent
                          }
                     }
 
@@ -397,8 +432,9 @@ std::vector<indicator_data::IndicatorValue> DataManager::getNewIndicatorValues(
                          // Add to the list of values to send
                          new_values.push_back(indicator_value); // Copy the value
 
-                         // Update the last sent timestamp for this subscriber and indicator
-                         subscriber_timestamps[key] = indicator_timestamp;
+                         // Update the last sent timestamp for this subscriber and indicator key
+                         subscriber_timestamps[indicator_key] = indicator_timestamp;
+                         // spdlog::trace("DataManager: Found new value for sub {} key {}", subscriber_id, indicator_key);
                     }
                 }
             }
@@ -409,19 +445,20 @@ std::vector<indicator_data::IndicatorValue> DataManager::getNewIndicatorValues(
 }
 
 void DataManager::addSubscriber(const std::string& subscriber_id) {
-    // No explicit state needed here beyond the last_sent_timestamps_ entry,
-    // which is created lazily in getNewIndicatorValues.
-     std::cout << "DataManager: Added subscriber state for ID: " << subscriber_id << std::endl;
-     // Could initialize last_sent_timestamps_[subscriber_id] here if preferred.
+    // When a subscriber connects, add an entry to track their last sent timestamps.
+    // The map is created lazily in getNewIndicatorValues, but explicit add is cleaner.
+     std::lock_guard<std::mutex> lock(latest_values_mutex_); // Lock the subscriber state map
+     last_sent_timestamps_[subscriber_id] = {}; // Initialize an empty map for the subscriber
+     spdlog::info("DataManager: Added subscriber state for ID: {}", subscriber_id);
 }
 
 void DataManager::removeSubscriber(const std::string& subscriber_id) {
      // Clean up the subscriber's state
     std::lock_guard<std::mutex> lock(latest_values_mutex_); // Lock access to subscriber state
     if (last_sent_timestamps_.erase(subscriber_id)) {
-        std::cout << "DataManager: Removed subscriber state for ID: " << subscriber_id << std::endl;
+        spdlog::info("DataManager: Removed subscriber state for ID: {}", subscriber_id);
     } else {
-         std::cerr << "DataManager: Warning - tried to remove non-existent subscriber state for ID: " << subscriber_id << std::endl;
+         spdlog::warn("DataManager: Warning - tried to remove non-existent subscriber state for ID: {}", subscriber_id);
     }
 }
 

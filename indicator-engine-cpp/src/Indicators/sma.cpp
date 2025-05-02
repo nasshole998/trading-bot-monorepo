@@ -1,8 +1,9 @@
 #include "indicators/sma.h"
 #include "utils/conversions.h" // For DecimalLike
+#include "utils/indicator_engine_error.h" // For Result
 #include <numeric> // For std::accumulate
-#include <iostream> // For debug output
 #include <vector> // Need vector for SIMD example
+#include <spdlog/spdlog.h> // For logging
 // Include SIMD headers if needed, e.g., <immintrin.h> for AVX
 
 
@@ -10,23 +11,28 @@ namespace Indicators {
 
 SMA::SMA(const SmaConfig& config) : config_(config) {
     if (config_.period <= 0) {
-        std::cerr << "Error: SMA period must be positive. Config: " << config_.name << std::endl;
-        // Handle invalid config, e.g., throw exception or mark as invalid
+        spdlog::error("SMA config error: Period must be positive. Config: {}", config_.name);
+        // Note: In a real system, the constructor might throw or return an error
+        // indication if validation fails, preventing creation of an invalid object.
     }
 }
 
 bool SMA::compute(const IndicatorEngine::DataManager& data_manager, DecimalLike* output_value) {
     if (!output_value) {
-        std::cerr << "Error: output_value pointer is null for SMA." << std::endl;
+        spdlog::error("SMA compute error: output_value pointer is null for {}", config_.name);
         return false;
     }
-     if (config_.period <= 0) return false; // Don't compute for invalid config
+     if (config_.period <= 0) {
+         spdlog::error("SMA compute error: Invalid period ({}) for {}", config_.period, config_.name);
+         return false; // Cannot compute with invalid period
+    }
 
     // Get the recent price data for the symbol
     auto recent_prices = data_manager.getRecentPrices(config_.symbol, config_.period);
 
-    if (recent_prices.size() < config_.period) {
+    if (recent_prices.size() < static_cast<size_t>(config_.period)) {
         // Not enough data yet to compute SMA
+        spdlog::debug("SMA compute info: Not enough data ({}/{}) for {}", recent_prices.size(), config_.period, config_.name);
         return false;
     }
 
@@ -68,7 +74,6 @@ bool SMA::compute(const IndicatorEngine::DataManager& data_manager, DecimalLike*
     //     #endif
     // }
 
-
     // For simple sum on a potentially non-contiguous deque, std::accumulate is often the most
     // practical approach. Compilers are good at optimizing it, potentially using SIMD automatically
     // if the underlying data structure allows (vector) or with runtime checks.
@@ -76,7 +81,7 @@ bool SMA::compute(const IndicatorEngine::DataManager& data_manager, DecimalLike*
 
     *output_value = sum / static_cast<DecimalLike>(config_.period);
 
-    // std::cout << "Computed SMA(" << config_.symbol << ", " << config_.period << "): " << *output_value << std::endl; // Debug
+    spdlog::debug("Computed {}: {}", config_.name, *output_value);
 
     return true;
 }

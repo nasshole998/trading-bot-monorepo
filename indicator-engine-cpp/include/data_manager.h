@@ -11,17 +11,19 @@
 #include <condition_variable> // For std::condition_variable
 #include <optional> // For std::optional
 #include <chrono> // For std::chrono::system_clock::time_point
+#include <utility> // For std::pair
+#include <algorithm> // For std::find
 
 #include "utils/conversions.h" // For DecimalLike
+#include "utils/indicator_engine_error.h" // Include custom error type
+
 #include "indicators/sma.h" // Need indicator config types and classes
 #include "indicators/rsi.h"
 #include "indicators/macd.h"
 #include "indicators/ema.h" // Need EMA config and class
+
 #include "generated/market_data.grpc.pb.h" // Generated Protobuf types
 #include "generated/indicator_data.grpc.pb.h.cc" // Include generated code for types
-#include <grpcpp/server_context.h>
-#include <grpcpp/server_reader.h>
-#include <grpcpp/server_writer.h>
 
 
 namespace IndicatorEngine {
@@ -33,11 +35,6 @@ struct SymbolData {
     std::deque<std::pair<DecimalLike, std::chrono::system_clock::time_point>> recent_prices;
 
     std::mutex mutex; // Protect access to this symbol's data buffer
-
-    // Add buffers for other data types if indicators need them directly (less common)
-    // std::deque<market_data::Trade> recent_trades;
-    // std::deque<market_data::Quote> recent_quotes;
-    // std::deque<market_data::OrderBookUpdate> recent_order_book_updates;
 };
 
 // Forward declarations for indicator calculators
@@ -57,10 +54,14 @@ public:
     ~DataManager(); // Destructor for cleanup
 
     // Process an incoming MarketDataEvent from the gRPC stream
-    void processMarketDataEvent(const market_data::MarketDataEvent& event);
+    // Returns success/failure using VoidResult
+    VoidResult processMarketDataEvent(const market_data::MarketDataEvent& event);
 
     // Get the most recent price and timestamp for a symbol
     std::optional<std::pair<DecimalLike, std::chrono::system_clock::time_point>> getLatestPriceWithTimestamp(const std::string& symbol) const;
+
+    // Get the most recent price for a symbol (only price)
+    std::optional<DecimalLike> getLatestPrice(const std::string& symbol) const;
 
     // Get a window of recent prices for a symbol (only prices)
     std::vector<DecimalLike> getRecentPrices(const std::string& symbol, int count) const;
@@ -70,11 +71,13 @@ public:
 
 
     // Register indicator instances (takes ownership)
-    void registerSMA(std::unique_ptr<Indicators::SMA> indicator);
-    void registerRSI(std::unique_ptr<Indicators::RSI> indicator);
-    void registerMACD(std::unique_ptr<Indicators::MACD> indicator);
-    void registerEMA(std::unique_ptr<Indicators::EMA> indicator);
+    // Returns success/failure using VoidResult
+    VoidResult registerSMA(std::unique_ptr<Indicators::SMA> indicator);
+    VoidResult registerRSI(std::unique_ptr<Indicators::RSI> indicator);
+    VoidResult registerMACD(std::unique_ptr<Indicators::MACD> indicator);
+    VoidResult registerEMA(std::unique_ptr<Indicators::EMA> indicator);
     // Add methods for other indicator types
+
 
     // Get the latest computed value for a specific indicator on a symbol
     std::optional<indicator_data::IndicatorValue> getLatestIndicatorValue(
@@ -84,7 +87,6 @@ public:
 
     // Get all latest indicator values matching a subscription request
     // Returns a vector of values that are newer than the last sent timestamp for this subscriber.
-    // Requires tracking per-subscriber state.
     std::vector<indicator_data::IndicatorValue> getNewIndicatorValues(
         const std::string& subscriber_id,
         const indicator_data::IndicatorSubscriptionRequest& request
@@ -99,6 +101,7 @@ public:
 
 
     // Condition variable and mutex for notifying subscriber threads
+    // Make them public so IndicatorServiceImpl can access them for waiting
     std::condition_variable new_indicator_cv_;
     std::mutex latest_values_mutex_; // Protects latest_indicator_values_ and last_sent_timestamps_
 
@@ -124,7 +127,7 @@ private:
     // Track the last timestamp of the value sent to each subscriber for each indicator
     // This prevents resending old values.
     std::unordered_map<std::string, // Subscriber ID
-                       std::unordered_map<std::string, // Indicator Name (e.g., "symbol:indicator_name")
+                       std::unordered_map<std::string, // Indicator Key ("symbol:indicator_name")
                                           std::chrono::system_clock::time_point // Last sent timestamp
                                          >> last_sent_timestamps_;
 

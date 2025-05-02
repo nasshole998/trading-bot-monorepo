@@ -1,31 +1,43 @@
 #include "utils/conversions.h"
+#include "utils/indicator_engine_error.h"
 #include <stdexcept> // For std::invalid_argument, std::out_of_range
 #include <cmath>     // For std::round, std::pow, std::isnan, std::isinf
 #include <limits>    // For numeric_limits
 #include <iomanip>   // For std::fixed, std::setprecision
 #include <sstream>   // For std::stringstream
-#include <iostream>  // For std::cerr
+#include <algorithm> // For std::max, std::min
+#include <spdlog/spdlog.h> // For logging
+
 
 namespace Utils {
 namespace Conversions {
 
-std::optional<DecimalLike> StringToDecimalLike(const std::string& s) {
-    if (s.empty()) return std::nullopt;
+IndicatorEngine::Result<DecimalLike> StringToDecimalLike(const std::string& s) {
+    if (s.empty()) {
+         spdlog::warn("StringToDecimalLike received empty string.");
+        return IndicatorEngine::Error::IndicatorEngineErrc::InvalidInputData; // Or ConversionError
+    }
     try {
         size_t processed_chars;
         DecimalLike value = std::stod(s, &processed_chars);
         if (processed_chars != s.length()) {
-             // Part of the string was not converted (e.g., "123.45abc")
-             std::cerr << "Warning: StringToDecimalLike did not convert entire string: '" << s << "'" << std::endl;
-             return std::nullopt; // Consider this an error
+             spdlog::warn("StringToDecimalLike did not convert entire string: '{}'", s);
+            // Depending on strictness, this could be an error or just a warning.
+            // Let's treat it as an error indicating invalid format.
+             return IndicatorEngine::Error::IndicatorEngineErrc::InvalidInputData;
         }
-        return value;
+        // Check for infinity or NaN after conversion, though stod might throw for some inputs.
+        if (std::isinf(value) || std::isnan(value)) {
+             spdlog::warn("StringToDecimalLike resulted in infinity or NaN for string: '{}'", s);
+             return IndicatorEngine::Error::IndicatorEngineErrc::ConversionError;
+        }
+        return value; // Success
     } catch (const std::invalid_argument& e) {
-        std::cerr << "Error converting string to double (invalid argument): '" << s << "' - " << e.what() << std::endl;
-        return std::nullopt; // Conversion failed
+        spdlog::error("Error converting string to double (invalid argument): '{}' - {}", s, e.what());
+        return IndicatorEngine::Error::IndicatorEngineErrc::InvalidInputData;
     } catch (const std::out_of_range& e) {
-         std::cerr << "Error converting string to double (out of range): '" << s << "' - " << e.what() << std::endl;
-         return std::nullopt; // Conversion failed
+         spdlog::error("Error converting string to double (out of range): '{}' - {}", s, e.what());
+         return IndicatorEngine::Error::IndicatorEngineErrc::ConversionError;
     }
 }
 
@@ -36,7 +48,8 @@ std::string DecimalLikeToString(DecimalLike d) {
     std::stringstream ss;
     // Use fixed precision for financial data. Choose an appropriate precision.
     // This is a simplified approach; a proper decimal type is better.
-    ss << std::fixed << std::setprecision(10) << d; // Example: 10 decimal places for slightly better representation
+    // Printing with high precision first, then trimming.
+    ss << std::fixed << std::setprecision(17) << d; // std::numeric_limits<double>::max_digits10 for full precision
     std::string s = ss.str();
 
     // Trim trailing zeros and decimal point if possible
@@ -65,16 +78,16 @@ std::string DecimalLikeToString(DecimalLike d) {
 
 std::chrono::system_clock::time_point
     ProtoTimestampToTimePoint(const google::protobuf::Timestamp& ts) {
-    // Handle potential invalid timestamps (e.g., negative seconds)
+    // Handle potential invalid timestamps (e.g., negative seconds, nanos out of range)
     if (ts.seconds() < 0 && ts.nanos() > 0) {
-         // Not strictly valid, might indicate an issue
-         std::cerr << "Warning: Received invalid Protobuf Timestamp (negative seconds, positive nanos)." << std::endl;
-         // Return a default or error indicator?
-         return std::chrono::system_clock::time_point(); // Return epoch or similar
+         spdlog::warn("Received Protobuf Timestamp with negative seconds ({}) but positive nanos ({}) for conversion.", ts.seconds(), ts.nanos());
+         // This indicates a potential issue with the timestamp source.
+         // Return epoch or throw error based on desired behavior.
+         return std::chrono::system_clock::time_point(); // Return epoch
     }
      if (ts.nanos() < 0 || ts.nanos() >= 1'000'000'000) {
-        std::cerr << "Warning: Received invalid Protobuf Timestamp (nanos out of range): " << ts.nanos() << std::endl;
-        // Return a default or adjust nanos? Adjusting is risky.
+        spdlog::warn("Received Protobuf Timestamp with nanos out of range ({}) for conversion.", ts.nanos());
+        // Attempt to clamp nanos, but this might lose information.
          google::protobuf::Timestamp valid_ts = ts;
          valid_ts.set_nanos(std::max(0, std::min(999'999'999, valid_ts.nanos())));
          return std::chrono::system_clock::time_point(
@@ -83,22 +96,32 @@ std::chrono::system_clock::time_point
         );
      }
 
-
-    return std::chrono::system_clock::time_point(
-        std::chrono::seconds(ts.seconds()) +
-        std::chrono::nanoseconds(ts.nanos())
-    );
+    // Convert seconds and nanos to duration, then to time_point
+    auto duration = std::chrono::seconds(ts.seconds()) + std::chrono::nanoseconds(ts.nanos());
+    return std::chrono::system_clock::time_point(duration);
 }
 
 google::protobuf::Timestamp
     TimePointToProtoTimestamp(const std::chrono::system_clock::time_point& tp) {
     auto duration = tp.time_since_epoch();
+    // Ensure duration is not negative if time_point is before epoch
+    if (duration < std::chrono::nanoseconds::zero()) {
+         spdlog::warn("Converting time_point before epoch to Protobuf Timestamp.");
+         // Protobuf Timestamp spec is ambiguous for pre-epoch, often treated as error source.
+         // Clamp to epoch or handle as error depending on convention.
+         // For simplicity, convert to epoch timestamp (0, 0).
+         google::protobuf::Timestamp ts;
+         ts.set_seconds(0);
+         ts.set_nanos(0);
+         return ts;
+    }
+
     auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
     auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration - seconds);
 
     google::protobuf::Timestamp ts;
     ts.set_seconds(seconds.count());
-    ts.set_nanos(nanos.count());
+    ts.set_nanos(static_cast<int32_t>(nanos.count())); // nanos should fit in i32
     return ts;
 }
 
