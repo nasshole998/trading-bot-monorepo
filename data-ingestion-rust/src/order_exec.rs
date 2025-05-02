@@ -1,327 +1,397 @@
-// data-ingestion-rust/src/order_exec.rs
-use crate::config::Settings;
-use crate::error::{DataIngestionError, Result};
-use crate::types::{AlpacaOrderRequest, AlpacaOrderResponse, AlpacaApiError};
-use log::{info, error, warn, debug};
-use reqwest::{Client, StatusCode};
-use std::time::Duration;
 use tonic::{Request, Response, Status};
+use tracing::{info, error, debug, trace};
+use crate::Result; // Use the custom Result type
+use futures::Stream;
+use std::pin::Pin;
+use std::time::{SystemTime, Duration};
 
-// Import generated gRPC server code
-pub mod orders_proto {
-    tonic::include_proto!("orders"); // Use the package name defined in orders.proto
+use crate::execution::{
+    execution_service_server::{ExecutionService, ExecutionServiceServer},
+    PlaceOrderRequest, PlaceOrderResponse, CancelOrderRequest, CancelOrderResponse,
+    OrderStatusRequest, OrderStatusResponse, OrderUpdate, StreamOrderUpdatesResponse,
+    OrderStatus, OrderType, OrderSide,
+    // Include other relevant enums if needed from proto
+};
+use crate::connector::ConnectorFactory;
+use crate::config::AppConfig;
+use tonic::transport::Channel;
+use crate::execution::execution_service_client::ExecutionServiceClient;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken; // For graceful shutdown
+use prost_types::Timestamp;
+use crate::utils::parse_decimal;
+
+
+// --- gRPC Server Implementation ---
+
+/// Implementation of the ExecutionService gRPC server.
+/// Receives Place/Cancel/Status requests FROM Infrastructure/Risk.
+pub struct ExecutionServiceImpl {
+    connector_factory: ConnectorFactory,
+    // Channel to send order updates *from* this service *to* the Infrastructure service.
+    // This channel is fed by both the REST responses (provisional) and the user data stream (authoritative).
+    order_update_tx: mpsc::Sender<OrderUpdate>,
+    // Config access might be needed for recv_window defaults
+    config: AppConfig,
 }
-use orders_proto::order_receiver_server::{OrderReceiver, OrderReceiverServer};
-use orders_proto::{OrderRequest as ProtoOrderRequest, OrderResponse as ProtoOrderResponse, CancelRequest as ProtoCancelRequest, CancelResponse as ProtoCancelResponse, OrderSide as ProtoOrderSide, OrderType as ProtoOrderType, TimeInForce as ProtoTimeInForce, OrderStatus as ProtoOrderStatus};
 
-// --- gRPC Service Implementation ---
-
-#[derive(Clone)] // Clone is needed for the Tonic server
-pub struct OrderReceiverService {
-    settings: Settings,
-    http_client: Client,
-}
-
-impl OrderReceiverService {
-    fn new(settings: Settings) -> Result<Self> {
-        // Build Reqwest client with timeouts and headers
-        let http_client = Client::builder()
-            .timeout(Duration::from_secs(15)) // General request timeout
-            .connect_timeout(Duration::from_secs(5)) // TCP connect timeout
-            .user_agent(format!("TradingBot/{} Rust Reqwest", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(DataIngestionError::HttpRequest)?;
-
-        Ok(OrderReceiverService { settings, http_client })
+impl ExecutionServiceImpl {
+    pub fn new(connector_factory: ConnectorFactory, order_update_tx: mpsc::Sender<OrderUpdate>, config: AppConfig) -> Self {
+        Self {
+            connector_factory,
+            order_update_tx,
+            config,
+        }
     }
 
-    /// Helper to make authenticated requests to Alpaca REST API
-    async fn post_alpaca<T: serde::Serialize>(
-        &self,
-        endpoint: &str,
-        payload: &T,
-    ) -> Result<reqwest::Response> {
-        let base_url = self.settings.get_alpaca_rest_base_url();
-        let url = format!("{}/v2/{}", base_url, endpoint);
-        let api_key = &self.settings.alpaca.api_key;
-        let secret_key = &self.settings.alpaca.secret_key;
-
-        debug!("POSTing to Alpaca: URL={}, Payload={:?}", url, serde_json::to_string(payload).unwrap_or_default());
-
-        let response = self.http_client
-            .post(&url)
-            .header("APCA-API-KEY-ID", api_key)
-            .header("APCA-API-SECRET-KEY", secret_key)
-            .json(payload)
-            .send()
-            .await?;
-
-        debug!("Alpaca Response Status: {}", response.status());
-        Ok(response)
-    }
-
-     /// Helper to delete orders via Alpaca REST API
-    async fn delete_alpaca(
-        &self,
-        endpoint: &str, // e.g., "orders/{order_id}"
-    ) -> Result<reqwest::Response> {
-        let base_url = self.settings.get_alpaca_rest_base_url();
-        let url = format!("{}/v2/{}", base_url, endpoint);
-        let api_key = &self.settings.alpaca.api_key;
-        let secret_key = &self.settings.alpaca.secret_key;
-
-        debug!("DELETEing from Alpaca: URL={}", url);
-
-        let response = self.http_client
-            .delete(&url)
-            .header("APCA-API-KEY-ID", api_key)
-            .header("APCA-API-SECRET-KEY", secret_key)
-            .send()
-            .await?;
-
-        debug!("Alpaca Response Status: {}", response.status());
-        Ok(response)
-    }
-
-    /// Helper to handle Alpaca API response, parsing success or error
-    async fn handle_alpaca_response<R: serde::de::DeserializeOwned>(
-        &self,
-        response: reqwest::Response,
-    ) -> Result<R> {
-        let status = response.status();
-        let raw_body = response.text().await?; // Read body once
-        debug!("Raw Alpaca Response Body: {}", raw_body);
-
-        if status.is_success() {
-            serde_json::from_str::<R>(&raw_body).map_err(DataIngestionError::Json)
-        } else {
-            // Try parsing Alpaca's error format
-            let api_error: AlpacaApiError = serde_json::from_str(&raw_body)
-                .unwrap_or_else(|e| AlpacaApiError {
-                    code: status.as_u16() as i32, // Use HTTP status code if parsing fails
-                    message: format!("Failed to parse error body: {}. Raw: {}", e, raw_body),
-                });
-            error!("Alpaca API Error: Status={}, Code={}, Message={}", status, api_error.code, api_error.message);
-            Err(DataIngestionError::AlpacaApi {
-                status: status.as_u16(),
-                message: api_error.message,
+    // Helper to get the connector and handle errors
+    fn get_connector(&self, exchange: &str) -> Result<&dyn crate::connector::ExchangeConnector, Status> {
+        self.connector_factory.get_connector(exchange)
+            .map(|arc_connector| arc_connector.as_ref()) // Get reference to the trait object
+            .map_err(|e| {
+                error!("Failed to get connector for exchange {}: {:?}", exchange, e); // Log underlying error
+                Status::invalid_argument(format!("Unsupported or misconfigured exchange: {}", exchange))
             })
-        }
     }
 
-    // --- Conversion Helpers ---
-
-    fn proto_to_alpaca_side(side: ProtoOrderSide) -> String {
-        match side {
-            ProtoOrderSide::Buy => "buy".to_string(),
-            ProtoOrderSide::Sell => "sell".to_string(),
-            ProtoOrderSide::OrderSideUnspecified => "buy".to_string(), // Default or error?
-        }
+    // Helper to get the Binance specific connector reference
+    #[cfg(feature = "binance_rest")]
+    fn get_binance_connector_ref(&self) -> Result<&crate::connector::BinanceSpotConnector, Status> {
+        self.connector_factory.get_binance_connector_ref()
+             .map_err(|e| {
+                error!("Failed to get Binance connector: {:?}", e);
+                Status::internal("Internal error getting Binance connector")
+            })
     }
 
-    fn proto_to_alpaca_type(order_type: ProtoOrderType) -> String {
-        match order_type {
-            ProtoOrderType::Market => "market".to_string(),
-            ProtoOrderType::Limit => "limit".to_string(),
-            ProtoOrderType::Stop => "stop".to_string(),
-            ProtoOrderType::StopLimit => "stop_limit".to_string(),
-            ProtoOrderType::TrailingStop => "trailing_stop".to_string(),
-            ProtoOrderType::OrderTypeUnspecified => "market".to_string(), // Default or error?
-        }
-    }
-
-     fn proto_to_alpaca_tif(tif: ProtoTimeInForce) -> String {
-        match tif {
-            ProtoTimeInForce::Day => "day".to_string(),
-            ProtoTimeInForce::Gtc => "gtc".to_string(),
-            ProtoTimeInForce::Opg => "opg".to_string(),
-            ProtoTimeInForce::Cls => "cls".to_string(),
-            ProtoTimeInForce::Ioc => "ioc".to_string(),
-            ProtoTimeInForce::Fok => "fok".to_string(),
-            ProtoTimeInForce::TimeInForceUnspecified => "day".to_string(), // Default or error?
-        }
-    }
-
-    fn alpaca_to_proto_status(status: &str) -> ProtoOrderStatus {
-        match status {
-            "new" | "pending_new" | "accepted" | "pending_replace" | "accepted_for_bidding" => ProtoOrderStatus::PendingNew,
-            "calculated" => ProtoOrderStatus::PendingNew, // Often pre-submission state
-            "partially_filled" => ProtoOrderStatus::PartiallyFilled,
-            "filled" => ProtoOrderStatus::Filled,
-            "done_for_day" => ProtoOrderStatus::Filled, // Or map based on filled_qty?
-            "canceled" | "pending_cancel" => ProtoOrderStatus::Canceled,
-            "stopped" => ProtoOrderStatus::Canceled, // Stop triggered
-            "rejected" => ProtoOrderStatus::Rejected,
-            "expired" => ProtoOrderStatus::Expired,
-            "replaced" => ProtoOrderStatus::Accepted, // Status after successful replace
-            _ => {
-                warn!("Unmapped Alpaca order status: {}", status);
-                ProtoOrderStatus::OrderStatusUnspecified
-            }
-        }
-    }
-
-}
-
-#[async_trait::async_trait]
-impl OrderReceiver for OrderReceiverService {
-    /// Handles incoming gRPC request to place an order
-    async fn place_order(
-        &self,
-        request: Request<ProtoOrderRequest>,
-    ) -> std::result::Result<Response<ProtoOrderResponse>, Status> {
-        let proto_req = request.into_inner();
-        info!("Received PlaceOrder request: {:?}", proto_req);
-
-        // Validate and convert proto request to Alpaca REST request format
-        let alpaca_req = AlpacaOrderRequest {
-            symbol: proto_req.symbol,
-            // Use String::from for quantity to handle potential float inaccuracies if needed
-            qty: Some(proto_req.quantity.to_string()),
-            notional: None, // Assuming quantity-based orders for now
-            side: Self::proto_to_alpaca_side(ProtoOrderSide::try_from(proto_req.side).unwrap_or_default()),
-            order_type: Self::proto_to_alpaca_type(ProtoOrderType::try_from(proto_req.r#type).unwrap_or_default()),
-            time_in_force: Self::proto_to_alpaca_tif(ProtoTimeInForce::try_from(proto_req.time_in_force).unwrap_or_default()),
-            limit_price: proto_req.limit_price.map(|p| p.to_string()),
-            stop_price: proto_req.stop_price.map(|p| p.to_string()),
-            trail_price: proto_req.trail_price.map(|p| p.to_string()),
-            trail_percent: proto_req.trail_percent.map(|p| p.to_string()),
-            extended_hours: proto_req.extended_hours,
-            client_order_id: Some(proto_req.client_order_id.clone()), // Ensure it's unique and within limits
-            order_class: None, // Add logic for complex orders if needed
-        };
-
-        // Send request to Alpaca
-        match self.post_alpaca("orders", &alpaca_req).await {
-            Ok(response) => {
-                // Handle Alpaca response
-                match self.handle_alpaca_response::<AlpacaOrderResponse>(response).await {
-                    Ok(alpaca_resp) => {
-                        info!("Alpaca order placement successful: {:?}", alpaca_resp);
-                        // Convert Alpaca response back to proto response
-                        let proto_resp = ProtoOrderResponse {
-                            client_order_id: alpaca_resp.client_order_id,
-                            server_order_id: alpaca_resp.id.to_string(),
-                            status: Self::alpaca_to_proto_status(&alpaca_resp.status).into(),
-                            created_at: to_proto_timestamp(alpaca_resp.created_at),
-                            message: None,
-                        };
-                        Ok(Response::new(proto_resp))
-                    }
-                    Err(e) => {
-                        error!("Failed to handle Alpaca order response: {}", e);
-                        // Return gRPC error status
-                        Err(Status::internal(format!("Alpaca API interaction failed: {}", e)))
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to send order request to Alpaca: {}", e);
-                Err(Status::internal(format!("HTTP request to Alpaca failed: {}", e)))
-            }
-        }
-    }
-
-    /// Handles incoming gRPC request to cancel an order
-    async fn cancel_order(
-        &self,
-        request: Request<ProtoCancelRequest>,
-    ) -> std::result::Result<Response<ProtoCancelResponse>, Status> {
-        let proto_req = request.into_inner();
-        info!("Received CancelOrder request: {:?}", proto_req);
-
-        // Prefer server_order_id if available, otherwise use client_order_id
-        let order_id_to_cancel = if !proto_req.server_order_id.is_empty() {
-            proto_req.server_order_id
-        } else if !proto_req.client_order_id.is_empty() {
-            // Note: Canceling by client_order_id might not be directly supported or reliable via DELETE.
-            // Alpaca's DELETE /v2/orders/{order_id} uses their ID.
-            // If only client_order_id is provided, we might need to first GET the order by client_order_id
-            // to find the server_order_id, which adds latency and complexity.
-            // For simplicity here, we assume server_order_id is preferred.
-             warn!("Cancellation by client_order_id requested - prefer using server_order_id from Alpaca.");
-             return Err(Status::invalid_argument("Cancellation by client_order_id is less reliable; use server_order_id if possible."));
-            // proto_req.client_order_id
-        } else {
-            return Err(Status::invalid_argument("Either server_order_id or client_order_id must be provided for cancellation."));
-        };
-
-        let endpoint = format!("orders/{}", order_id_to_cancel);
-
-        // Send DELETE request to Alpaca
-        match self.delete_alpaca(&endpoint).await {
-            Ok(response) => {
-                let status_code = response.status();
-                 // Alpaca DELETE /v2/orders/{order_id} might return:
-                 // - 204 No Content on successful cancellation request (order might still be pending_cancel)
-                 // - 404 Not Found if order doesn't exist or already done
-                 // - 422 Unprocessable Entity if order cannot be canceled (e.g., already filled)
-                 // - 207 Multi-Status (less common for single cancel)
-                if status_code == StatusCode::NO_CONTENT {
-                     info!("Alpaca order cancellation request successful for {}", order_id_to_cancel);
-                     // We don't get the full order details back on DELETE 204.
-                     // We might need a subsequent GET if we need the final status immediately.
-                     // For now, return a success indicating the request was accepted.
-                     let proto_resp = ProtoCancelResponse {
-                         // Try to echo back IDs if possible
-                         client_order_id: if proto_req.server_order_id.is_empty() { proto_req.client_order_id } else { "".to_string() },
-                         server_order_id: if !proto_req.server_order_id.is_empty() { proto_req.server_order_id } else { order_id_to_cancel }, // Best guess
-                         status: ProtoOrderStatus::PendingCancel.into(), // Assume pending cancel
-                         message: Some("Cancellation request accepted by Alpaca.".to_string()),
-                     };
-                     Ok(Response::new(proto_resp))
-                } else if status_code == StatusCode::NOT_FOUND {
-                    warn!("Order {} not found or already processed, cannot cancel.", order_id_to_cancel);
-                    Err(Status::not_found(format!("Order {} not found or already processed.", order_id_to_cancel)))
-                } else if status_code == StatusCode::UNPROCESSABLE_ENTITY {
-                     error!("Order {} cannot be canceled (likely already filled/rejected/canceled).", order_id_to_cancel);
-                     // Try to parse error message if available
-                     let body = response.text().await.unwrap_or_default();
-                     let api_error: AlpacaApiError = serde_json::from_str(&body).unwrap_or_else(|_| AlpacaApiError { code: 422, message: body });
-                     Err(Status::failed_precondition(format!("Order {} cannot be canceled: {}", order_id_to_cancel, api_error.message)))
-                }
-                 else {
-                    // Handle other unexpected statuses
-                    let body = response.text().await.unwrap_or_default();
-                    error!("Unexpected status {} during Alpaca order cancellation for {}: {}", status_code, order_id_to_cancel, body);
-                    Err(Status::internal(format!("Alpaca cancellation failed with status {}: {}", status_code, body)))
-                }
-            }
-            Err(e) => {
-                error!("Failed to send cancel request to Alpaca for {}: {}", order_id_to_cancel, e);
-                Err(Status::internal(format!("HTTP request to Alpaca failed: {}", e)))
-            }
-        }
+    // Helper to send an OrderUpdate message via the internal channel (non-blocking)
+    fn send_order_update(&self, update: OrderUpdate) {
+         trace!("Attempting to send OrderUpdate: {:?}", update);
+         // Use try_send to avoid blocking the gRPC server handler
+         if let Err(e) = self.order_update_tx.try_send(update) {
+             warn!("Failed to send order update to channel: {}", e);
+             // Channel likely full or receiver dropped. Monitor this.
+         }
     }
 }
 
+#[tonic::async_trait]
+impl ExecutionService for ExecutionServiceImpl {
+    async fn place_order(&self, request: Request<PlaceOrderRequest>) -> Result<Response<PlaceOrderResponse>, Status> {
+        let mut req = request.into_inner();
+        info!("Received PlaceOrder request: {:?}", req);
 
-/// Task responsible for running the gRPC server to receive order requests.
-pub async fn run_grpc_server_task(settings: Settings) -> Result<()> {
-    let bind_address = settings.grpc.order_receiver_bind_address.parse()?;
-    info!("Starting gRPC Order Receiver server on {}...", bind_address);
+        // Basic validation
+        if req.exchange.is_empty() || req.symbol.is_empty() || req.quantity.is_empty() || req.client_order_id.is_empty() {
+             return Err(Status::invalid_argument("Missing required fields: exchange, symbol, quantity, client_order_id"));
+        }
+        if req.order_type == OrderType::ORDER_TYPE_UNKNOWN as i32 || req.side == OrderSide::SIDE_UNKNOWN as i32 {
+            return Err(Status::invalid_argument("Invalid order_type or side"));
+        }
+         if req.order_type == OrderType::LIMIT as i32 && req.price.is_empty() {
+             return Err(Status::invalid_argument("Price is required for LIMIT orders"));
+         }
+         // TODO: More sophisticated validation (e.g., quantity/price format, symbol format)
+         if crate::utils::parse_decimal(&req.quantity).is_err() { return Err(Status::invalid_argument("Invalid quantity format")); }
+         if req.order_type == OrderType::LIMIT as i32 && crate::utils::parse_decimal(&req.price).is_err() { return Err(Status::invalid_argument("Invalid price format")); }
 
-    let order_service = OrderReceiverService::new(settings.clone())?;
 
+        let connector = self.get_connector(&req.exchange)?; // Gets the BinanceConnector
+
+        // Add default recvWindow from config if not provided in request
+        if req.recv_window == 0 {
+            if let Some(exchange_cfg) = self.config.exchanges.get(&req.exchange) {
+                 req.recv_window = exchange_cfg.recv_window_ms as i64;
+            } else {
+                 // Should not happen if get_connector succeeded, but defensive
+                 warn!("No config found for exchange {}", req.exchange);
+            }
+        }
+
+
+        match connector.place_order(req.clone()).await {
+            Ok(response) => {
+                info!("PlaceOrder successful for client_order_id {}: {:?}", req.client_order_id, response);
+
+                // Immediately send a provisional order update back to Infrastructure via the channel
+                // This uses data from the REST response which might be incomplete but is faster
+                // than waiting for the User Data Stream.
+                let provisional_update = OrderUpdate {
+                    exchange: req.exchange.clone(),
+                    symbol: req.symbol.clone(), // Use symbol from request (exchange format expected by Binance API)
+                    order_id: response.order_id.clone(),
+                    client_order_id: req.client_order_id.clone(),
+                    status: response.status, // Status from Binance response (e.g., NEW)
+                    executed_quantity: "0".to_string(), // Provisional
+                    cumulative_quote_quantity: "0".to_string(), // Provisional
+                    executed_price: "0".to_string(), // Provisional
+                    timestamp: response.transac_time.or_else(|| Some(Timestamp::from(SystemTime::now()))), // Use exchange time or local
+                    message: response.message.clone(),
+                    order_type: req.order_type,
+                    side: req.side,
+                    price: req.price.clone(), // Original price
+                    quantity: req.quantity.clone(), // Original quantity
+                };
+                self.send_order_update(provisional_update);
+
+                Ok(Response::new(response))
+            },
+            Err(e) => {
+                error!("PlaceOrder failed for client_order_id {}: {:?}", req.client_order_id, e); // Log underlying error
+                // Attempt to derive a meaningful status/message from the error
+                let status = match e {
+                     // Map specific DataIngestionError variants to gRPC Status codes
+                     DataIngestionError::ConnectorError(ref anyhow_err) => {
+                         // Could inspect anyhow_err details if connector provided specific info
+                         Status::internal(format!("Exchange API error: {}", anyhow_err))
+                     },
+                     DataIngestionError::GrpcStatus(s) => s, // If connector returned a gRPC status directly
+                     _ => Status::internal(format!("Internal error: {}", e)),
+                 };
+
+                 let failed_response = PlaceOrderResponse {
+                     exchange: req.exchange,
+                     symbol: req.symbol,
+                     order_id: None, // No exchange ID on failure
+                     client_order_id: req.client_order_id.clone(),
+                     status: OrderStatus::REJECTED as i32, // Assume rejected on API error
+                     message: status.message().to_string(),
+                     transac_time: Some(Timestamp::from(SystemTime::now())), // Use local time for failure
+                 };
+                 // Send a rejected update
+                  let rejected_update = OrderUpdate {
+                     exchange: failed_response.exchange.clone(),
+                     symbol: failed_response.symbol.clone(),
+                     order_id: failed_response.order_id.clone().unwrap_or_default(),
+                     client_order_id: failed_response.client_order_id.clone(),
+                     status: failed_response.status,
+                     executed_quantity: "0".to_string(),
+                     cumulative_quote_quantity: "0".to_string(),
+                     executed_price: "0".to_string(),
+                     timestamp: Some(Timestamp::from(SystemTime::now())),
+                     message: failed_response.message.clone(),
+                     order_type: req.order_type,
+                     side: req.side,
+                     price: req.price.clone(),
+                     quantity: req.quantity.clone(),
+                  };
+                 self.send_order_update(rejected_update);
+
+                Err(status) // Return the gRPC status error
+            }
+        }
+    }
+
+     async fn cancel_order(&self, request: Request<CancelOrderRequest>) -> Result<Response<CancelOrderResponse>, Status> {
+        let mut req = request.into_inner();
+        info!("Received CancelOrder request: {:?}", req);
+
+        // Basic validation
+         if req.exchange.is_empty() || req.symbol.is_empty() || (req.order_id.is_empty() && req.client_order_id.is_empty()) {
+             return Err(Status::invalid_argument("Missing exchange, symbol, and either order_id or client_order_id"));
+         }
+         // TODO: Validate symbol format
+
+        let connector = self.get_connector(&req.exchange)?; // Gets the BinanceConnector
+
+         // Add default recvWindow from config if not provided in request
+        if req.recv_window == 0 {
+            if let Some(exchange_cfg) = self.config.exchanges.get(&req.exchange) {
+                 req.recv_window = exchange_cfg.recv_window_ms as i64;
+            }
+        }
+
+
+        match connector.cancel_order(req.clone()).await {
+            Ok(response) => {
+                info!("CancelOrder successful for order {}: {:?}", req.order_id, response);
+
+                // Send an order update reflecting the cancellation attempt status (might be CANCELLING initially)
+                // The authoritative status (CANCELLED or PARTIALLY_FILLED/FILLED if it executed before cancel)
+                // will come from the user data stream.
+                let cancellation_update = OrderUpdate {
+                     exchange: req.exchange.clone(),
+                     symbol: req.symbol.clone(),
+                     order_id: response.order_id.clone(),
+                     client_order_id: response.client_order_id.clone(),
+                     status: if response.success { OrderStatus::CANCELLING as i32 } else { OrderStatus::STATUS_UNKNOWN as i32 /* Could be REJECTED depending on API response */ }, // Best guess status based on success flag
+                     executed_quantity: "0".to_string(), // Don't know filled qty from cancel response typically
+                     cumulative_quote_quantity: "0".to_string(),
+                     executed_price: "0".to_string(),
+                     timestamp: Some(Timestamp::from(SystemTime::now())), // Use local time for provisional
+                     message: response.message.clone(),
+                     order_type: 0, // Unknown from cancel response fields provided in proto
+                     side: 0,       // Unknown from cancel response fields provided in proto
+                     price: "0".to_string(), // Unknown
+                     quantity: "0".to_string(), // Unknown
+                };
+                self.send_order_update(cancellation_update);
+
+                Ok(Response::new(response))
+            },
+            Err(e) => {
+                error!("CancelOrder failed for order {}: {:?}", req.order_id, e);
+                 let status = match e {
+                     DataIngestionError::ConnectorError(ref anyhow_err) => {
+                         Status::internal(format!("Exchange API error: {}", anyhow_err))
+                     },
+                     DataIngestionError::GrpcStatus(s) => s,
+                     _ => Status::internal(format!("Internal error: {}", e)),
+                 };
+                 // Could potentially send an update with status REJECTED if the error indicates that
+                Err(status)
+            }
+        }
+     }
+
+    async fn get_order_status(&self, request: Request<OrderStatusRequest>) -> Result<Response<OrderStatusResponse>, Status> {
+         let mut req = request.into_inner();
+         info!("Received GetOrderStatus request: {:?}", req);
+
+          if req.exchange.is_empty() || req.symbol.is_empty() || (req.order_id.is_empty() && req.client_order_id.is_empty()) {
+             return Err(Status::invalid_argument("Missing exchange, symbol, and either order_id or client_order_id"));
+         }
+         // TODO: Validate symbol format
+
+         let connector = self.get_connector(&req.exchange)?; // Gets the BinanceConnector
+
+         // Add default recvWindow from config if not provided in request
+        if req.recv_window == 0 {
+            if let Some(exchange_cfg) = self.config.exchanges.get(&req.exchange) {
+                 req.recv_window = exchange_cfg.recv_window_ms as i64;
+            }
+        }
+
+
+         match connector.get_order_status(req.clone()).await {
+             Ok(response) => {
+                 info!("GetOrderStatus successful for order {}: {:?}", req.order_id, response);
+
+                 // Send an order update with the retrieved status. This is authoritative
+                 // at the time of the poll, but user data stream is preferred for real-time.
+                 let status_update = OrderUpdate {
+                     exchange: req.exchange.clone(),
+                     symbol: req.symbol.clone(),
+                     order_id: response.order_id.clone(),
+                     client_order_id: response.client_order_id.clone(),
+                     status: response.status,
+                     executed_quantity: response.executed_quantity.clone(),
+                     cumulative_quote_quantity: response.cumulative_quote_quantity.clone(),
+                     executed_price: response.executed_price.clone(),
+                     timestamp: response.update_time, // Use timestamp from response
+                     message: response.message.clone(),
+                     order_type: response.order_type, // Use actual type from status response
+                     side: response.side, // Use actual side from status response
+                     price: response.price.clone(), // Use actual price from status response
+                     quantity: response.quantity.clone(), // Use actual quantity from status response
+                 };
+                  self.send_order_update(status_update);
+
+                 Ok(Response::new(response))
+             },
+             Err(e) => {
+                 error!("GetOrderStatus failed for order {}: {:?}", req.order_id, e);
+                 let status = match e {
+                     DataIngestionError::ConnectorError(ref anyhow_err) => {
+                         Status::internal(format!("Exchange API error: {}", anyhow_err))
+                     },
+                     DataIngestionError::GrpcStatus(s) => s,
+                     _ => Status::internal(format!("Internal error: {}", e)),
+                 };
+                Err(status)
+             }
+         }
+    }
+
+    // StreamOrderUpdates is implemented by the Infrastructure service as a SERVER,
+    // and called by THIS service as a CLIENT. It is NOT implemented on this server.
+}
+
+/// Task to start the gRPC server for execution requests (Place, Cancel, Status).
+/// This server is called BY Infrastructure/Risk Management.
+pub async fn start_execution_grpc_server(config: AppConfig, connector_factory: ConnectorFactory, order_update_tx: mpsc::Sender<OrderUpdate>, cancel_token: CancellationToken) -> Result<()> {
+    let listen_addr = config.grpc.listen_addr.parse()?;
+    info!("Starting ExecutionService gRPC server on {}", listen_addr);
+
+    // Pass config and connector factory to the service implementation
+    let execution_service = ExecutionServiceImpl::new(connector_factory, order_update_tx, config);
+    let svc = execution::execution_service_server::ExecutionServiceServer::new(execution_service);
+
+    // Use tokio::select! to listen for both server events and shutdown signal
     tonic::transport::Server::builder()
-        .add_service(OrderReceiverServer::new(order_service))
-        .serve(bind_address)
-        .await?; // This runs indefinitely until shutdown or error
+        .add_service(svc)
+        .serve_with_shutdown(listen_addr, cancel_token.cancelled()) // serve_with_shutdown is crucial for graceful exit
+        .await?;
 
-    warn!("gRPC Order Receiver server has shut down.");
+    info!("ExecutionService gRPC server stopped.");
     Ok(())
 }
 
-// Helper to convert chrono DateTime to prost Timestamp (duplicate from grpc_client, consider moving to utils)
-fn to_proto_timestamp(dt: chrono::DateTime<chrono::Utc>) -> Option<prost_types::Timestamp> {
-    let seconds = dt.timestamp();
-    let nanos = dt.timestamp_subsec_nanos();
-    if nanos >= 1_000_000_000 {
-        error!("Timestamp nanoseconds out of range: {}", nanos);
-        return None;
+/// Task to stream order updates TO Infrastructure Service via gRPC client stream.
+/// This task consumes from an MPSC channel.
+pub async fn stream_order_updates_to_infrastructure_task(
+    grpc_server_addr: String,
+    mut order_update_rx: mpsc::Receiver<OrderUpdate>,
+    cancel_token: CancellationToken,
+) -> Result<()> {
+     info!("Starting gRPC order update streaming task.");
+
+     // Keep attempting to connect and stream
+     loop {
+        tokio::select! {
+            // Attempt to connect
+            conn_res = ExecutionServiceClient::connect(grpc_server_addr.clone()).fuse() => {
+                 match conn_res {
+                     Ok(mut client) => {
+                         info!("Order update stream client connected to {}", grpc_server_addr);
+
+                         // Convert the MPSC receiver into a stream compatible with Tonic
+                         let outbound = ReceiverStream::new(order_update_rx);
+
+                         // Call the client-streaming RPC method on the Infrastructure server
+                         info!("Starting gRPC client StreamOrderUpdates...");
+                         match client.stream_order_updates(outbound).await {
+                             Ok(response) => {
+                                 info!("Order update stream to Infrastructure established.");
+                                  // For a client-streaming call, the response future completes
+                                 // when the server sends back the single response OR the connection breaks.
+                                 // We need to wait for this to detect server-side closure or errors.
+                                 match response.into_inner().await {
+                                     Ok(stream_response) => info!("Order update stream to Infrastructure finished successfully with response: {:?}", stream_response),
+                                     Err(e) => error!("Order update stream to Infrastructure ended with error: {}", e),
+                                 }
+                             }
+                             Err(e) => {
+                                 error!("Failed to establish gRPC client StreamOrderUpdates: {}", e);
+                                 // This could be a transient error or a configuration issue.
+                                 // Retry connection loop.
+                             }
+                         }
+                         // If stream ends or fails, order_update_rx is likely still valid unless dropped externally.
+                         // Re-assign rx from the loop's outer scope if needed for retries, but MPSC receivers
+                         // cannot be cloned. A better pattern is to recreate the channel or use a different sync primitive.
+                         // For simplicity here, if the inner stream call fails, the outer loop retries the connection.
+                         // If the MPSC receiver is dropped, the `outbound` stream will end, gracefully closing the gRPC stream.
+
+                     },
+                     Err(e) => {
+                         error!("Failed to connect to Infrastructure service at {}: {}. Retrying in 5 seconds...", grpc_server_addr, e);
+                          tokio::time::sleep(Duration::from_secs(5)).await;
+                     }
+                 }
+            },
+            // Listen for the shutdown signal
+            _ = cancel_token.cancelled() => {
+                info!("Shutdown signal received, stopping gRPC order update streaming task.");
+                 // Drop the receiver half here to signal the outbound stream to end
+                 drop(order_update_rx);
+                 // Wait briefly for the stream to close? Or rely on tokio's shutdown?
+                break; // Exit the connection/retry loop
+            }
+        }
     }
-    Some(prost_types::Timestamp {
-        seconds,
-        nanos: nanos as i32,
-    })
+
+     info!("gRPC order update streaming task finished.");
+     Ok(())
 }

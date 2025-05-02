@@ -1,233 +1,353 @@
-// data-ingestion-rust/src/market_stream.rs
-use crate::config::Settings;
-use crate::error::{DataIngestionError, Result};
-use crate::types::{AlpacaStreamMessage, MarketData, TickData, QuoteData};
-use futures::{SinkExt, StreamExt};
-use log::{info, warn, error, debug};
-use tokio::sync::mpsc;
+use futures::StreamExt;
+use barter_data::{
+    builder::{Subscription, SubKind},
+    model::{Exchange, MarketEvent},
+    subscription::trade::PublicTrade,
+    subscription::book::{OrderBook, OrderBookL2},
+    subscription::quote::Quote,
+    ExchangeId,
+};
+use rust_decimal::Decimal;
+use tracing::{info, error, warn, debug, trace};
+use crate::Result; // Use the custom Result type
 use tokio::time::{sleep, Duration};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use url::Url;
+use chrono::{DateTime, Utc}; // For converting timestamps
 
-/// Task responsible for connecting to Alpaca WebSocket, handling messages, and sending parsed data.
-pub async fn run_market_stream_task(
-    settings: Settings,
-    market_data_tx: mpsc::Sender<MarketData>,
-) -> Result<()> {
-    let stream_url = Url::parse(&settings.alpaca.data_stream_url)?;
-    let api_key = settings.alpaca.api_key.clone();
-    let secret_key = settings.alpaca.secret_key.clone();
-    let symbols_to_subscribe = settings.symbols.clone();
-    let reconnect_delay = Duration::from_millis(settings.reconnect_delay_ms);
+use crate::market_data::{
+    market_data_service_client::MarketDataServiceClient,
+    StreamMarketDataRequest, MarketDataEvent, Trade, Quote as ProtoQuote,
+    OrderBookUpdate as ProtoOrderBookUpdate, OrderBookLevel as ProtoOrderBookLevel, OrderSide,
+    StreamMarketDataResponse, // Need the response message
+};
+use crate::config::AppConfig;
+use tonic::transport::Channel;
+use futures::{SinkExt, FutureExt}; // For gRPC client streams, .fuse()
+use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::mpsc;
+use prost_types::Timestamp; // For Protobuf timestamps
+use std::str::FromStr;
+use tokio_util::sync::CancellationToken; // For graceful shutdown
 
-    info!("Starting market data streaming task for {} symbols.", symbols_to_subscribe.len());
+const GRPC_CHANNEL_SIZE: usize = 4096; // Buffer size for gRPC client streams
 
-    loop { // Outer loop for reconnection attempts
-        info!("Attempting to connect to WebSocket: {}", stream_url);
-        match connect_async(stream_url.clone()).await {
-            Ok((ws_stream, response)) => {
-                info!("WebSocket handshake successful! Response: {:?}", response.status());
-                let (mut write_half, mut read_half) = ws_stream.split();
 
-                // --- Authentication ---
-                let auth_msg = serde_json::json!({
-                    "action": "auth",
-                    "key": api_key,
-                    "secret": secret_key
-                });
-                info!("Sending authentication message...");
-                if let Err(e) = write_half.send(Message::Text(auth_msg.to_string())).await {
-                    error!("Failed to send authentication message: {}", e);
-                    sleep(reconnect_delay).await;
-                    continue; // Retry connection
-                }
-
-                let mut authenticated = false;
-                let mut subscribed = false;
-
-                // --- Message Handling Loop ---
-                while let Some(message_result) = read_half.next().await {
-                    match message_result {
-                        Ok(message) => {
-                            match message {
-                                Message::Text(text) => {
-                                    debug!("Received raw text message: {}", text);
-                                    // Expecting an array of messages usually
-                                    if text.starts_with('[') && text.ends_with(']') {
-                                        match serde_json::from_str::<Vec<AlpacaStreamMessage>>(&text) {
-                                            Ok(messages) => {
-                                                for msg in messages {
-                                                    match msg {
-                                                        AlpacaStreamMessage::Control(ctrl) => {
-                                                            info!("Received control message: {:?}", ctrl);
-                                                            if ctrl.msg == "authenticated" {
-                                                                authenticated = true;
-                                                                info!("Authentication successful!");
-                                                                // --- Subscription ---
-                                                                let sub_msg = build_subscription_message(&symbols_to_subscribe);
-                                                                info!("Sending subscription message for {} symbols...", symbols_to_subscribe.len());
-                                                                if let Err(e) = write_half.send(Message::Text(sub_msg.to_string())).await {
-                                                                    error!("Failed to send subscription message: {}", e);
-                                                                    // Should trigger reconnect by breaking loop
-                                                                    break;
-                                                                }
-                                                            } else if ctrl.msg == "subscription" {
-                                                                 // You might get confirmation per channel (trades, quotes, bars)
-                                                                 info!("Subscription confirmation received: {:?}", ctrl);
-                                                                 subscribed = true; // Consider more granular tracking if needed
-                                                            } else if ctrl.code.is_some() {
-                                                                error!("Received error control message: {:?}", ctrl);
-                                                                // Decide action based on error code (e.g., auth failed, sub failed)
-                                                                break; // Break to reconnect on critical errors
-                                                            }
-                                                        }
-                                                        AlpacaStreamMessage::Trade(trade) if authenticated && subscribed => {
-                                                            let tick = TickData {
-                                                                symbol: trade.symbol,
-                                                                timestamp: trade.timestamp,
-                                                                price: trade.price,
-                                                                size: trade.size,
-                                                                exchange: trade.exchange,
-                                                                conditions: trade.conditions,
-                                                                tape: trade.tape,
-                                                                trade_id: trade.trade_id,
-                                                                internal_id: uuid::Uuid::new_v4(),
-                                                            };
-                                                            if let Err(e) = market_data_tx.send(MarketData::Tick(tick)).await {
-                                                                error!("Failed to send TickData via channel: {}", e);
-                                                                // If channel is closed, the receiver task likely died, maybe exit?
-                                                                if market_data_tx.is_closed() {
-                                                                    error!("Market data channel closed. Exiting stream task.");
-                                                                    return Err(DataIngestionError::ChannelSend("Market data channel closed".to_string()));
-                                                                }
-                                                            }
-                                                        }
-                                                        AlpacaStreamMessage::Quote(quote) if authenticated && subscribed => {
-                                                            let quote_data = QuoteData {
-                                                                symbol: quote.symbol,
-                                                                timestamp: quote.timestamp,
-                                                                bid_price: quote.bid_price,
-                                                                bid_size: quote.bid_size,
-                                                                bid_exchange: quote.bid_exchange,
-                                                                ask_price: quote.ask_price,
-                                                                ask_size: quote.ask_size,
-                                                                ask_exchange: quote.ask_exchange,
-                                                                conditions: quote.conditions,
-                                                                tape: quote.tape,
-                                                                internal_id: uuid::Uuid::new_v4(),
-                                                            };
-                                                             if let Err(e) = market_data_tx.send(MarketData::Quote(quote_data)).await {
-                                                                error!("Failed to send QuoteData via channel: {}", e);
-                                                                 if market_data_tx.is_closed() {
-                                                                    error!("Market data channel closed. Exiting stream task.");
-                                                                    return Err(DataIngestionError::ChannelSend("Market data channel closed".to_string()));
-                                                                }
-                                                            }
-                                                        }
-                                                        AlpacaStreamMessage::Bar(_) if authenticated && subscribed => {
-                                                            // Handle bars if subscribed
-                                                            // let bar_data = ... ;
-                                                            // market_data_tx.send(MarketData::Bar(bar_data)).await?;
-                                                            debug!("Received Alpaca Bar (parsing not fully implemented yet).");
-                                                        }
-                                                        AlpacaStreamMessage::Unknown => {
-                                                            warn!("Received unknown Alpaca message type within array.");
-                                                        }
-                                                        _ => {
-                                                            // Ignore other message types for now, or messages received before subscribed
-                                                            debug!("Ignoring message type or received before fully subscribed.");
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to deserialize Alpaca message array: {}. Raw: {}", e, text);
-                                                // Decide if this is critical enough to reconnect
-                                            }
-                                        }
-                                    } else {
-                                         warn!("Received non-array text message: {}", text);
-                                         // Could be a single control message not in an array? Handle if necessary.
-                                         match serde_json::from_str::<AlpacaStreamMessage>(&text) {
-                                             Ok(AlpacaStreamMessage::Control(ctrl)) if ctrl.msg == "connected" => {
-                                                 info!("Received 'connected' confirmation.");
-                                                 // This usually comes first, before auth message needs to be sent.
-                                             },
-                                             _ => {
-                                                 warn!("Unhandled single text message format.");
-                                             }
-                                         }
-                                    }
-                                }
-                                Message::Binary(_) => {
-                                    warn!("Received unexpected binary message.");
-                                }
-                                Message::Ping(ping_data) => {
-                                    debug!("Received Ping, sending Pong.");
-                                    if let Err(e) = write_half.send(Message::Pong(ping_data)).await {
-                                        error!("Failed to send Pong: {}", e);
-                                        break; // Assume connection issue
-                                    }
-                                }
-                                Message::Pong(_) => {
-                                    debug!("Received Pong."); // We don't typically send Pings, but good to log
-                                }
-                                Message::Close(close_frame) => {
-                                    warn!("Received WebSocket Close frame: {:?}", close_frame);
-                                    break; // Break inner loop to trigger reconnect
-                                }
-                                Message::Frame(_) => {
-                                    // Raw frame, usually not needed with tokio-tungstenite
-                                    debug!("Received raw frame.");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Error reading from WebSocket: {}", e);
-                            break; // Break inner loop to trigger reconnect
-                        }
-                    }
-                } // End of message handling loop
-
-                warn!("WebSocket connection lost or closed.");
-            }
-            Err(e) => {
-                error!("WebSocket connection failed: {}", e);
-            }
-        }
-
-        // Wait before attempting to reconnect
-        warn!("Waiting {:?} before reconnecting...", reconnect_delay);
-        sleep(reconnect_delay).await;
-
-    } // End of outer reconnection loop (unreachable if task exits via error return)
+/// Maps a barter-data ExchangeId to our internal string format.
+fn map_exchange_id_to_str(exchange_id: &ExchangeId) -> String {
+    match exchange_id {
+        // Map specific barter-data IDs to your desired internal string
+        ExchangeId::BinanceSpot => "binance".to_string(),
+        _ => exchange_id.as_str().to_lowercase(), // Fallback for others, but expecting binance
+    }
 }
 
-/// Helper to construct the subscription message JSON
-fn build_subscription_message(symbols: &[String]) -> serde_json::Value {
-    // Separate symbols into stocks and crypto if needed, based on format like "BTC/USD" vs "AAPL"
-    let mut trades = Vec::new();
-    let mut quotes = Vec::new();
-    // let mut bars = Vec::new(); // Add if subscribing to bars
-
-    for symbol in symbols {
-        // Simple check, might need refinement based on exact symbol formats used
-        // if symbol.contains('/') { // Assume crypto
-             // Alpaca crypto streams might use different channel names or formats
-             // Adjust based on v1beta3 documentation if targeting crypto primarily
-        // } else { // Assume stock (SIP)
-            trades.push(symbol.clone());
-            quotes.push(symbol.clone());
-            // bars.push(symbol.clone());
-        // }
+/// Converts chrono DateTime<Utc> to Protobuf Timestamp.
+fn to_proto_timestamp(dt: DateTime<Utc>) -> Timestamp {
+    Timestamp {
+        seconds: dt.timestamp(),
+        nanos: dt.timestamp_subsec_nanos() as i32,
     }
+}
 
-    serde_json::json!({
-        "action": "subscribe",
-        "trades": trades,
-        "quotes": quotes,
-        // "bars": bars // Add if subscribing to bars
-        // Add other channels: dailyBars, statuses, lulds as needed
+/// Maps barter-data PublicTrade to our Protobuf Trade type.
+fn map_barter_trade_to_proto(trade: PublicTrade) -> Result<Trade> {
+     let price = crate::utils::parse_decimal(&trade.price.to_string())?; // Ensure valid decimal string
+     let quantity = crate::utils::parse_decimal(&trade.quantity.to_string())?; // Ensure valid decimal string
+     let quote_quantity = price * quantity; // Calculate quote quantity
+
+     Ok(Trade {
+        exchange: map_exchange_id_to_str(&trade.exchange),
+        symbol: trade.instrument_id.to_string().to_lowercase(), // Use normalized symbol format
+        id: trade.id,
+        price: trade.price.to_string(),
+        quantity: trade.quantity.to_string(),
+        quote_quantity: quote_quantity.to_string(),
+        side: match trade.side {
+            barter_data::subscription::trade::TradeSide::Buy => OrderSide::BUY as i32,
+            barter_data::subscription::trade::TradeSide::Sell => OrderSide::SELL as i32,
+        },
+        buy_order_id: trade.buy_order_id.unwrap_or_default(), // Provide default if None
+        sell_order_id: trade.sell_order_id.unwrap_or_default(), // Provide default if None
+        timestamp: Some(to_proto_timestamp(trade.timestamp)),
+     })
+}
+
+/// Maps barter-data Quote to our Protobuf Quote type.
+fn map_barter_quote_to_proto(quote: Quote) -> Result<ProtoQuote> {
+    // Validate decimals
+    let _bid_price = crate::utils::parse_decimal(&quote.bid.price.to_string())?;
+    let _bid_quantity = crate::utils::parse_decimal(&quote.bid.quantity.to_string())?;
+    let _ask_price = crate::utils::parse_decimal(&quote.ask.price.to_string())?;
+    let _ask_quantity = crate::utils::parse_decimal(&quote.ask.quantity.to_string())?;
+
+    Ok(ProtoQuote {
+        exchange: map_exchange_id_to_str(&quote.exchange),
+        symbol: quote.instrument_id.to_string().to_lowercase(),
+        bid_price: quote.bid.price.to_string(),
+        bid_quantity: quote.bid.quantity.to_string(),
+        ask_price: quote.ask.price.to_string(),
+        ask_quantity: quote.ask.quantity.to_string(),
+        timestamp: Some(to_proto_timestamp(quote.timestamp)),
     })
 }
 
+/// Maps barter-data OrderBook (L2) to our Protobuf OrderBookUpdate type.
+fn map_barter_orderbook_to_proto(book: OrderBookL2) -> Result<ProtoOrderBookUpdate> {
+    // Map bids, validating decimals
+    let bids: Result<Vec<ProtoOrderBookLevel>> = book.bids.into_iter().map(|(price, quantity)| {
+         let _p = crate::utils::parse_decimal(&price.to_string())?;
+         let _q = crate::utils::parse_decimal(&quantity.to_string())?;
+         Ok(ProtoOrderBookLevel {
+            price: price.to_string(),
+            quantity: quantity.to_string(),
+        })
+    }).collect();
+
+    // Map asks, validating decimals
+    let asks: Result<Vec<ProtoOrderBookLevel>> = book.asks.into_iter().map(|(price, quantity)| {
+         let _p = crate::utils::parse_decimal(&price.to_string())?;
+         let _q = crate::utils::parse_decimal(&quantity.to_string())?;
+         Ok(ProtoOrderBookLevel {
+            price: price.to_string(),
+            quantity: quantity.to_string(),
+        })
+    }).collect();
+
+    Ok(ProtoOrderBookUpdate {
+        exchange: map_exchange_id_to_str(&book.exchange),
+        symbol: book.instrument_id.to_string().to_lowercase(),
+        bids: bids?, // Propagate errors from bid/ask mapping
+        asks: asks?, // Propagate errors from bid/ask mapping
+        timestamp: Some(to_proto_timestamp(book.timestamp)),
+        // TODO: If barter-data provides update IDs (U/u), add them to Protobuf and map here
+    })
+}
+
+
+/// Builds barter-data subscriptions from configuration for Binance.
+fn build_subscriptions(config: &AppConfig) -> Vec<Subscription<SubKind>> {
+    let mut subscriptions = Vec::new();
+    // Assuming only Binance is configured for now
+    if let Some(exchange_config) = config.exchanges.get("binance") {
+        let exchange_id = ExchangeId::BinanceSpot;
+
+        for symbol in &exchange_config.symbols {
+            // Ensure barter-data symbol format (lowercase, base_quote)
+            let parts: Vec<&str> = symbol.split('_').collect();
+            if parts.len() != 2 {
+                warn!("Invalid symbol format in config for barter-data: {}. Expected base_quote.", symbol);
+                continue;
+            }
+            let instrument = format!("{}_{}", parts[0].to_lowercase(), parts[1].to_lowercase());
+
+            let instrument_id = match barter_data::instrument::Instrument::from(
+                 &exchange_id,
+                 &instrument
+             ) {
+                 Ok(id) => id,
+                 Err(e) => {
+                     error!("Failed to create barter-data Instrument for Binance symbol {}: {}", symbol, e);
+                     continue; // Skip this symbol
+                 }
+             };
+
+
+            for data_type in &exchange_config.data_types {
+                match data_type.to_lowercase().as_str() {
+                    "trade" => {
+                        info!("Subscribing to {}:{} trades", exchange_id, instrument_id);
+                        subscriptions.push(Subscription::new(exchange_id.clone(), instrument_id.clone(), SubKind::Trade));
+                    }
+                    "quote" => {
+                         info!("Subscribing to {}:{} quotes", exchange_id, instrument_id);
+                         subscriptions.push(Subscription::new(exchange_id.clone(), instrument_id.clone(), SubKind::Quote));
+                    }
+                    "order_book" => {
+                         info!("Subscribing to {}:{} order book", exchange_id, instrument_id);
+                         // Note: OrderBook subscription needs specific depth if required.
+                         // barter-data supports different book kinds (L1, L2, etc.). Using L2 here.
+                         // Depth is typically configured within barter-data builder or subscription options if available
+                         subscriptions.push(Subscription::new(exchange_id.clone(), instrument_id.clone(), SubKind::Book));
+                    }
+                    _ => warn!("Unsupported data type '{}' for {}:{}", data_type, exchange_id, instrument_id),
+                }
+            }
+        }
+    } else {
+        warn!("Binance exchange not found in configuration for market data.");
+    }
+
+    subscriptions
+}
+
+/// Task to ingest market data from Barter-Data and send it to an MPSC channel.
+/// A separate task will read from the channel and stream via gRPC.
+pub async fn start_market_data_ingestion_loop(config: AppConfig, data_tx: mpsc::Sender<MarketDataEvent>, cancel_token: CancellationToken) -> Result<()> {
+    info!("Starting market data ingestion loop...");
+
+    let subscriptions = build_subscriptions(&config);
+
+    if subscriptions.is_empty() {
+        warn!("No valid market data subscriptions configured. Ingestion loop will not start.");
+        return Ok(());
+    }
+
+    // --- Start Barter-Data Stream ---
+    let mut stream = match barter_data::builder::Streams::<PublicTrade>::new()
+        .with_subscriptions(subscriptions)
+        .init()
+        .await
+    {
+        Ok(s) => {
+             info!("Barter-Data Streams initialized.");
+             s
+        },
+        Err(e) => {
+             error!("Failed to initialise Barter-Data Streams: {}. Market data ingestion loop failed.", e);
+             return Err(e.into());
+        }
+    };
+
+
+    // --- Process incoming market events and send via MPSC channel ---
+    loop {
+        tokio::select! {
+            // Poll the barter-data stream for the next market event
+            Some(event_result) = stream.next() => {
+                match event_result {
+                    Ok(market_event) => {
+                        trace!("Received barter-data event: {:?}", market_event);
+                        // Map barter-data event to our Protobuf format
+                        let proto_event_option = match market_event.event {
+                            barter_data::model::EventKind::Market(data) => match data {
+                                 barter_data::model::MarketEventKind::Trade(trade) => match map_barter_trade_to_proto(trade) {
+                                     Ok(t) => Some(MarketDataEvent { event: Some(market_data::market_data_event::Event::Trade(t)) }),
+                                     Err(e) => { error!("Failed to map Trade event: {}", e); None } // Log error and skip event
+                                 },
+                                 barter_data::model::MarketEventKind::Quote(quote) => match map_barter_quote_to_proto(quote) {
+                                     Ok(q) => Some(MarketDataEvent { event: Some(market_data::market_data_event::Event::Quote(q)) }),
+                                      Err(e) => { error!("Failed to map Quote event: {}", e); None } // Log error and skip event
+                                 },
+                                 barter_data::model::MarketEventKind::Book(book) => {
+                                    if let barter_data::model::book::OrderBook::L2(l2_book) = book {
+                                         match map_barter_orderbook_to_proto(l2_book) {
+                                             Ok(ob) => Some(MarketDataEvent { event: Some(market_data::market_data_event::Event::OrderBookUpdate(ob)) }),
+                                             Err(e) => { error!("Failed to map OrderBook event: {}", e); None } // Log error and skip event
+                                         }
+                                    } else {
+                                         debug!("Received unhandled OrderBook type from barter-data");
+                                         None // Skip other book types for now
+                                    }
+                                 },
+                                 _ => { trace!("Received unhandled MarketEventKind: {:?}", data); None }
+                            },
+                            barter_data::model::EventKind::Status(status) => {
+                                 debug!("Received barter-data Status event: {:?}", status);
+                                 None // Don't send status events via data stream
+                            }
+                            barter_data::model::EventKind::Error(error) => {
+                                 error!("Received barter-data Error event: {:?}", error);
+                                  // Barter-Data attempts reconnection, but monitor errors here.
+                                 None // Don't send error events via data stream
+                            }
+                            _ => { trace!("Received unhandled barter-data EventKind: {:?}", market_event.event); None }
+                        };
+
+                        // Send the mapped event onto the MPSC channel for the gRPC sender task
+                        if let Some(proto_event) = proto_event_option {
+                             // Use try_send to avoid blocking the ingestion loop if the gRPC sender is slow
+                             if let Err(e) = data_tx.try_send(proto_event) {
+                                 warn!("Failed to send market data event to gRPC channel: {}. Channel might be full or receiver dropped.", e);
+                                 // Depending on strategy, might want to drop the event, log, or try sending again.
+                                 // For low-latency, dropping might be acceptable.
+                             }
+                        }
+                    },
+                    Err(err) => {
+                        error!("Error from Barter-Data stream: {}. Attempting to recover...", err);
+                         // Sleep briefly to prevent tight loop on persistent errors from barter-data
+                         tokio::time::sleep(Duration::from_millis(500)).await; // Slightly longer sleep
+                    }
+                }
+            },
+            // Listen for the shutdown signal
+            _ = cancel_token.cancelled() => {
+                info!("Shutdown signal received, stopping market data ingestion loop.");
+                break; // Exit the event processing loop
+            }
+        }
+    }
+
+    // The MPSC sender `data_tx` will be dropped when this function exits,
+    // signaling the gRPC sender task (listening on `rx`) to finish its stream.
+
+    info!("Market data ingestion loop finished.");
+    Ok(())
+}
+
+/// Task to send market data events TO Indicator/ML Engine via gRPC client stream.
+/// This task consumes from an MPSC channel.
+async fn grpc_market_data_sender_task(
+    grpc_server_addr: String,
+    mut rx: mpsc::Receiver<MarketDataEvent>,
+    cancel_token: CancellationToken,
+) -> Result<()> {
+    info!("Starting gRPC market data sender task.");
+
+    // Keep attempting to connect and stream
+    loop {
+        tokio::select! {
+            // Attempt to connect
+            conn_res = MarketDataServiceClient::connect(grpc_server_addr.clone()).fuse() => {
+                 match conn_res {
+                     Ok(mut client) => {
+                         info!("gRPC market data sender client connected to {}", grpc_server_addr);
+
+                         // Convert the MPSC receiver into a stream compatible with Tonic
+                         let outbound = ReceiverStream::new(rx);
+
+                         // Call the client-streaming RPC method
+                         info!("Starting gRPC client stream_market_data...");
+                         match client.stream_market_data(outbound).await {
+                             Ok(response) => {
+                                 info!("gRPC market data stream to server established.");
+                                  // For a client-streaming call, the response future completes
+                                 // when the server sends back the single response OR the connection breaks.
+                                 // We need to wait for this to detect server-side closure or errors.
+                                 match response.into_inner().await {
+                                     Ok(stream_response) => info!("gRPC market data stream finished successfully with response: {:?}", stream_response),
+                                     Err(e) => error!("gRPC market data stream ended with error: {}", e),
+                                 }
+                             }
+                             Err(e) => {
+                                 error!("Failed to establish gRPC client stream_market_data: {}", e);
+                                 // This could be a transient error or a configuration issue.
+                                 // Retry connection loop.
+                             }
+                         }
+                         // If stream ends or fails, rx is likely still valid unless dropped externally.
+                         // Re-assign rx from the loop's outer scope if needed for retries, but MPSC receivers
+                         // cannot be cloned. A better pattern is to recreate the channel or use a different sync primitive.
+                         // For simplicity here, if the inner stream call fails, the outer loop retries the connection.
+                         // If the MPSC receiver is dropped, the `outbound` stream will end, gracefully closing the gRPC stream.
+
+                     },
+                     Err(e) => {
+                         error!("Failed to connect to MarketDataService at {}: {}. Retrying in 5 seconds...", grpc_server_addr, e);
+                          tokio::time::sleep(Duration::from_secs(5)).await;
+                     }
+                 }
+            },
+            // Listen for the shutdown signal
+            _ = cancel_token.cancelled() => {
+                info!("Shutdown signal received, stopping gRPC market data sender task.");
+                 // Drop the receiver half here to signal the outbound stream to end
+                 drop(rx);
+                 // Wait briefly for the stream to close? Or rely on tokio's shutdown?
+                break; // Exit the connection/retry loop
+            }
+        }
+    }
+
+     info!("gRPC market data sender task finished.");
+     Ok(())
+}

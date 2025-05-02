@@ -1,84 +1,68 @@
-# data-ingestion-rust/Dockerfile
+# Stage 1: Build the application
+FROM rust:1.77-bookworm as builder
 
-# --- Builder Stage ---
-# Use the official Rust image as a builder
-# Choose a specific version tag for reproducibility, e.g., 1.77
-# Use slim-bullseye for smaller base image size
-FROM rust:1.77-slim-bullseye as builder
+WORKDIR /app
 
-# Set working directory
-WORKDIR /usr/src/app
-
-# Install build dependencies needed by some crates (e.g., openssl-sys, grpcio-sys)
-# Update package lists and install dependencies
+# Install necessary build dependencies for crypto libraries etc.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
-    # Add build-essential or clang if needed for specific C dependencies
-    # build-essential
-    # Add protobuf compiler if not using pure Rust prost/tonic
-    # protobuf-compiler
-    # Clean up apt cache
+    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Cargo manifests and lock file
-COPY Cargo.toml Cargo.lock ./
-# Copy build script if it exists
-COPY build.rs ./build.rs
-# Copy proto files needed by build.rs (adjust path as needed)
-# Create the directory first to avoid permission issues if it doesn't exist
-RUN mkdir -p ../../proto
-COPY ../../proto/market_data.proto ../../proto/
-COPY ../../proto/orders.proto ../../proto/
 
-# Build dependencies separately to leverage Docker cache
-# Create a dummy src/main.rs to allow building dependencies without full source code
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-# Build only the dependencies
-RUN cargo build --release --locked
+# Copy Cargo.toml and build.rs first to leverage Docker caching
+# Assume build.rs is needed for gRPC proto compilation
+COPY data-ingestion-rust/Cargo.toml data-ingestion-rust/Cargo.lock ./
+COPY data-ingestion-rust/build.rs ./build.rs
+# Copy proto files for build.rs - assuming they are at the monorepo root
+COPY proto/ ./proto/
 
-# Remove dummy main.rs
-RUN rm -f src/main.rs
+# Dummy src dir structure for build.rs dependencies if needed by build script
+# If build.rs only needs proto files, this might not be strictly necessary,
+# but it protects against future build.rs changes.
+RUN mkdir src/
+RUN echo "fn main() { println!(\"dummy build\"); }" > src/lib.rs # Dummy lib.rs
+RUN echo "mod lib;" > src/main.rs # Dummy main.rs
 
-# Copy the actual source code
-COPY src ./src
+# Build dependencies only (will fail if build.rs needs more src files)
+# This is an optimization: if only src changes, dependencies are cached.
+# If build.rs needs real src code, this needs adjustment.
+# Alternatively, copy all src first if build.rs needs it.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --locked --release --target x86_64-unknown-linux-gnu
 
-# Build the application in release mode
-# Ensure build script runs again if source changed
-RUN touch src/main.rs && cargo build --release --locked --verbose
+# Copy the rest of the source code
+COPY data-ingestion-rust/src/ ./src/
+
+# Rebuild, leveraging cached dependencies. This compiles your actual code.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --locked --release --target x86_64-unknown-linux-gnu
 
 
-# --- Runtime Stage ---
-# Use a minimal base image for the final container
-# Debian slim is a good balance between size and having common utilities/libs
-FROM debian:bullseye-slim
+# Stage 2: Create the final small image
+FROM debian:bookworm-slim
 
-# Install runtime dependencies (e.g., OpenSSL libraries)
+# Install necessary runtime dependencies (e.g., for openssl)
+# Adjust based on your Rust features and OS requirements
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libssl1.1 \
     ca-certificates \
-    # Clean up apt cache
+    libssl3 \
     && rm -rf /var/lib/apt/lists/*
-
-# Set working directory
-WORKDIR /app
 
 # Copy the compiled binary from the builder stage
-COPY --from=builder /usr/src/app/target/release/data-ingestion-rust .
+COPY --from=builder /app/target/x86_664-unknown-linux-gnu/release/data-ingestion-rust /usr/local/bin/data-ingestion-rust
 
-# Copy configuration files (optional, could be mounted as volume)
-COPY config ./config
+# Create a directory for configuration
+RUN mkdir /app/config
+WORKDIR /app
+# Copy default config if you have one - consider injecting this via deployment tools instead
+# COPY data-ingestion-rust/config/settings.yaml ./config/settings.yaml
 
-# Set environment variables (optional defaults, can be overridden)
-ENV RUN_MODE="production"
-ENV CONFIG_DIR="/app/config"
-# Set log level via RUST_LOG if not using config file setting primarily
-# ENV RUST_LOG="info"
+# Set the entrypoint to your binary
+ENTRYPOINT ["/usr/local/bin/data-ingestion-rust"]
 
-# Expose the gRPC server port defined in the config
-# This needs to match `grpc.order_receiver_bind_address` port
-EXPOSE 50052
-
-# Command to run the application
-CMD ["./data-ingestion-rust"]
-
+# Command to run (uses config file or env vars)
+CMD []

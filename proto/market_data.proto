@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package market_data;
+
+import "google/protobuf/timestamp.proto";
+
+// Service for streaming market data from the Ingestion service to consumers.
+service MarketDataService {
+  // Server-side streaming RPC to send market data events to the client.
+  // The client (Indicator/ML Engine) calls this, and the server (Ingestion) streams data back.
+  // Note: The previous idea was client-streaming (Ingestion sends to Indicator/ML).
+  // Let's stick to server-streaming as it's more typical for data feeds.
+  // The client initiates and receives a stream of events.
+  rpc StreamMarketData(StreamMarketDataRequest) returns (stream MarketDataEvent);
+}
+
+message StreamMarketDataRequest {
+    // Could include filtering options here later, e.g., list of symbols
+}
+
+message MarketDataEvent {
+  // Use oneof to represent different types of market data events
+  oneof event {
+    Trade trade = 1;
+    Quote quote = 2;
+    OrderBookUpdate order_book_update = 3; // Incremental or full update
+    // Add other event types like FundingRate, Kline, etc.
+  }
+  // Could add a sequence number or timestamp here if needed for all events
+}
+
+message Trade {
+  string exchange = 1;         // e.g., "binance"
+  string symbol = 2;           // e.g., "btc_usdt" (normalized)
+  string id = 3;               // Exchange-specific trade ID
+  string price = 4;            // Use string for Decimal precision
+  string quantity = 5;         // Use string for Decimal precision (base asset)
+  string quote_quantity = 6;   // Use string for Decimal precision (quote asset, price * quantity)
+  OrderSide side = 7;          // BUY or SELL
+  // Exchange-specific IDs, useful for linking trades to orders
+  string buy_order_id = 8;
+  string sell_order_id = 9;
+  google.protobuf.Timestamp timestamp = 10; // Trade timestamp from exchange
+}
+
+message Quote {
+  string exchange = 1;         // e.g., "binance"
+  string symbol = 2;           // e.g., "btc_usdt"
+  string bid_price = 3;        // Best bid price (string for Decimal)
+  string bid_quantity = 4;     // Best bid quantity (string for Decimal)
+  string ask_price = 5;        // Best ask price (string for Decimal)
+  string ask_quantity = 6;     // Best ask quantity (string for Decimal)
+  google.protobuf.Timestamp timestamp = 7; // Quote timestamp
+}
+
+// Simplified Order Book Update - could be full snapshot or incremental diffs
+message OrderBookUpdate {
+    string exchange = 1;        // e.g., "binance"
+    string symbol = 2;          // e.g., "btc_usdt"
+    repeated OrderBookLevel bids = 3; // List of bid levels (price, quantity)
+    repeated OrderBookLevel asks = 4; // List of ask levels (price, quantity)
+    // Could add update IDs (U/u for Binance) for sequence checking
+    // uint64 first_update_id = 5;
+    // uint64 last_update_id = 6;
+    google.protobuf.Timestamp timestamp = 7; // Timestamp of the update
+    // bool is_snapshot = 8; // Indicate if this is a full snapshot
+}
+
+message OrderBookLevel {
+    string price = 1;    // String for Decimal precision
+    string quantity = 2; // String for Decimal precision
+}
+
+// Define common enums (can reuse this or define separately in each proto)
+enum OrderSide {
+    SIDE_UNKNOWN = 0; // Default value
+    BUY = 1;
+    SELL = 2;
+}

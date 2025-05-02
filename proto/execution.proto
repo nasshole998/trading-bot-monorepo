@@ -1,0 +1,144 @@
+syntax = "proto3";
+
+package execution;
+
+import "google/protobuf/timestamp.proto";
+
+// Service for handling order execution requests and sending order updates.
+service ExecutionService {
+  // Unary RPC to place a new order.
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
+
+  // Unary RPC to cancel an existing order.
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+
+  // Unary RPC to get the status of an order by ID or client ID.
+  rpc GetOrderStatus(OrderStatusRequest) returns (OrderStatusResponse);
+
+  // Client-side streaming RPC to send real-time order updates from Ingestion to Infrastructure.
+  // Ingestion service acts as a client streaming OrderUpdate messages.
+  rpc StreamOrderUpdates(stream OrderUpdate) returns (StreamOrderUpdatesResponse);
+
+  // TODO: Add other RPCs as needed, e.g., GetAccountBalance, GetOpenOrders, etc.
+}
+
+message PlaceOrderRequest {
+  string exchange = 1;          // e.g., "binance"
+  string symbol = 2;            // e.g., "BTCUSDT" (exchange format for request)
+  OrderType order_type = 3;     // LIMIT, MARKET, etc.
+  OrderSide side = 4;           // BUY or SELL
+  string quantity = 5;          // Base asset quantity (string for Decimal)
+  string price = 6;             // Price for LIMIT orders (string for Decimal)
+  string client_order_id = 7;   // Your unique ID for this order
+  // TODO: Add more fields for different order types (stopPrice, timeInForce, etc.)
+  int64 recv_window = 8;        // Binance specific: max time in ms for request to be valid
+}
+
+message PlaceOrderResponse {
+  string exchange = 1;          // e.g., "binance"
+  string symbol = 2;            // e.g., "BTCUSDT"
+  string order_id = 3;          // Exchange-assigned order ID
+  string client_order_id = 4;   // The client_order_id from the request
+  OrderStatus status = 5;       // Current status (NEW, FILLED, etc.)
+  string message = 6;           // Optional message (e.g., error details)
+  google.protobuf/timestamp.proto.Timestamp transac_time = 7; // Transaction time from exchange
+}
+
+message CancelOrderRequest {
+  string exchange = 1;          // e.g., "binance"
+  string symbol = 2;            // e.g., "BTCUSDT"
+  string order_id = 3;          // Exchange-assigned order ID (optional, use client_order_id if none)
+  string client_order_id = 4;   // Your unique ID for this order (optional)
+  int64 recv_window = 5;        // Binance specific
+}
+
+message CancelOrderResponse {
+  string exchange = 1;          // e.g., "binance"
+  string symbol = 2;            // e.g., "BTCUSDT"
+  string order_id = 3;          // Exchange-assigned order ID
+  string client_order_id = 4;   // Client ID
+  bool success = 5;             // True if cancellation request was accepted
+  string message = 6;           // Optional message
+  // Binance cancel response includes status, price, quantity, etc. Could add these
+  // OrderStatus status = 7;
+  // string price = 8;
+  // string quantity = 9;
+}
+
+message OrderStatusRequest {
+  string exchange = 1;          // e.g., "binance"
+  string symbol = 2;            // e.g., "BTCUSDT"
+  string order_id = 3;          // Exchange-assigned order ID (optional, use client_order_id if none)
+  string client_order_id = 4;   // Your unique ID for this order (optional)
+  int64 recv_window = 5;        // Binance specific
+}
+
+message OrderStatusResponse {
+  string exchange = 1;          // e.g., "binance"
+  string symbol = 2;            // e.g., "BTCUSDT"
+  string order_id = 3;          // Exchange-assigned order ID
+  string client_order_id = 4;   // Client ID
+  OrderStatus status = 5;       // Current status
+  string price = 6;             // Order price
+  string quantity = 7;          // Order quantity
+  string executed_quantity = 8; // Filled quantity
+  string cumulative_quote_quantity = 9; // Cumulative filled quote quantity
+  string executed_price = 10;   // Avg executed price (cumulativeQuoteQuantity / executedQuantity)
+  string message = 11;          // Optional message
+  google.protobuf/timestamp.proto.Timestamp update_time = 12; // Last update time
+  // Add other fields like commission, fee asset, timeInForce, etc.
+}
+
+message OrderUpdate {
+  string exchange = 1;          // e.g., "binance"
+  string symbol = 2;            // e.g., "BTCUSDT"
+  string order_id = 3;          // Exchange-assigned order ID
+  string client_order_id = 4;   // Client ID
+  OrderStatus status = 5;       // New status
+  string executed_quantity = 6; // Cumulative filled quantity at this update
+  string cumulative_quote_quantity = 7; // Cumulative filled quote quantity
+  string executed_price = 8;    // Avg executed price (cumulativeQuoteQuantity / executedQuantity) - derived
+  google.protobuf/timestamp.proto.Timestamp timestamp = 9; // Timestamp of the update (from exchange if possible)
+  string message = 10;          // Optional message/event type from exchange (e.g., "EXECUTION_REPORT")
+  // Add other fields from Execution Report events (commission, fee asset, etc.)
+  string order_type = 11; // Original order type
+  string side = 12;       // Original order side
+  string price = 13;      // Original order price
+  string quantity = 14;   // Original order quantity
+}
+
+message StreamOrderUpdatesResponse {
+    // Empty response message for the client streaming method
+}
+
+
+// Define common enums (can reuse this or define separately in each proto)
+enum OrderType {
+    ORDER_TYPE_UNKNOWN = 0; // Default value
+    LIMIT = 1;
+    MARKET = 2;
+    STOP_LOSS = 3;
+    STOP_LOSS_LIMIT = 4;
+    TAKE_PROFIT = 5;
+    TAKE_PROFIT_LIMIT = 6;
+    LIMIT_MAKER = 7;
+}
+
+enum OrderSide {
+    SIDE_UNKNOWN = 0; // Default value
+    BUY = 1;
+    SELL = 2;
+}
+
+enum OrderStatus {
+    STATUS_UNKNOWN = 0; // Default value
+    NEW = 1;
+    PARTIALLY_FILLED = 2;
+    FILLED = 3;
+    CANCELLING = 4; // Exchange is attempting to cancel
+    CANCELLED = 5;
+    PENDING_CANCEL = 6; // Pending Cancel state (rare)
+    REJECTED = 7;
+    EXPIRED = 8;
+    // Add other statuses if needed
+}

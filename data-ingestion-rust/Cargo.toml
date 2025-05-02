@@ -1,38 +1,65 @@
-# data-ingestion-rust/Cargo.toml
 [package]
 name = "data-ingestion-rust"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] } # Async runtime, all features
-serde = { version = "1.0", features = ["derive"] } # Serialization/Deserialization
-serde_json = "1.0" # JSON handling
-config = { version = "0.14", features = ["toml", "yaml", "env"] } # Configuration management
-log = "0.4" # Logging facade
-env_logger = "0.11" # Logging implementation
-futures = "0.3" # Async utilities (SinkExt, StreamExt)
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] } # Async WebSocket client
-# Alternatively, use "rustls-tls" feature if you prefer Rustls over native TLS
-# tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
-url = "2.5" # URL parsing
-thiserror = "1.0" # Error handling helper
-async-trait = "0.1" # Async traits
-prost = "0.12" # Protobuf code generation (runtime)
-tonic = "0.11" # gRPC framework (runtime)
-uuid = { version = "1.7", features = ["v4", "serde"] } # For generating unique IDs
-chrono = { version = "0.4", features = ["serde"] } # Date/time handling
-bytes = "1" # Utilities for working with bytes
+tokio = { version = "1.37", features = ["full"] } # Full features for simplicity in example, refine in prod
+barter-data = { version = "0.7", features = ["default", "with-serde"] } # Use default features including exchange support, plus serde for config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Use thiserror for custom errors
+thiserror = "1.0"
+anyhow = "1.0" # Still useful for simpler top-level error handling in main
+futures = "0.3" # Utilities for async streams, .fuse()
+url = "2.5" # For URL parsing
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false } # Secure TLS, JSON
+async-trait = "0.1" # For async traits
 
-# Alpaca REST API client (optional but useful for orders, account info)
-# Check for actively maintained forks or alternatives if needed.
-# Using a placeholder, you might need to find or build a suitable crate.
-# alpaca-rs = { git = "https://github.com/some-maintained-fork/alpaca-rs" } # Example
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false } # HTTP Client (fallback for REST)
+# Binance API specific
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] } # For timestamps
+http = "1.0" # For building request URLs and headers
+form_urlencoded = "0.1" # For building query strings
 
+# Rate Limiting (Example using governor)
+governor = "0.6"
+# pin-project-lite = "0.2" # Usually pulled transitively
 
-# Internal communication channel (alternative to direct gRPC calls in some patterns)
-# crossbeam-channel = "0.5"
+# gRPC dependencies
+tonic = "0.11"
+prost = "0.12"
+prost-types = "0.12" # For Timestamp, etc.
+
+# Configuration management
+config = { version = "0.14", features = ["yaml", "toml", "json"] } # Flexible config loading
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-futures = "0.2" # For tracing async operations
+
+# Financial types
+rust_decimal = { version = "1.35", features = ["serde"] }
+rust_decimal_macros = "1.35"
+
+# Graceful Shutdown
+tokio-util = { version = "0.7", features = ["signal"] } # For CancellationToken or similar
+
+# HTTP Server for Health Check
+warp = "0.3" # Lightweight web server framework
+tokio-stream = "0.1" # Needed by warp
+
+# Feature flags for exchanges (Only keeping Binance for now)
+[features]
+binance_rest = [] # Keep the feature flag even if only one exchange, useful later
 
 [build-dependencies]
-tonic-build = "0.11" # gRPC code generation (build time)
+tonic-build = "0.11"
+prost-build = "0.12"
+
+[dev-dependencies]
+tokio-tungstenite = "0.21" # For mocking WebSockets
+mockito = "1.4" # For mocking REST calls
