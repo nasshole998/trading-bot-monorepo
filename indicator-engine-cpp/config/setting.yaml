@@ -1,29 +1,72 @@
+# Configuration for the Indicator Engine Service
+
+# gRPC server configuration for this service
 grpc:
-  listen_address: "0.0.0.0:50051" # Address for this service's gRPC server
+  listen_address: "0.0.0.0:50051" # Address where this service listens for gRPC connections (from Data Ingestion, Strategy Engine)
 
+# HTTP health check server configuration
 health_check:
-  listen_address: "0.0.0.0:8080" # Address for the HTTP health check server
+  listen_address: "0.0.0.0:8080" # Address where the HTTP health check server listens
 
-max_history_size: 2000 # Max prices to store per symbol
+# Maximum number of recent market data points (prices) to store per symbol.
+# Indicators requiring N periods need at least N data points (sometimes N+1 or more for initial smoothing).
+# Set this larger than the largest period used by any indicator.
+max_history_size: 400 # Example: Sufficient for a 200-period indicator
 
+# Definitions of the specific indicator instances to run.
+# Each entry specifies the indicator type, a unique name, the symbol, and parameters.
 indicators:
   sma:
-    - name: "SMA_20"
-      symbol: "btc_usdt"
+    - name: "SMA_20_BTCUSDT"
+      symbol: "btc_usdt" # Normalized symbol format
       period: 20
-    - name: "SMA_50"
+    - name: "SMA_50_BTCUSDT"
       symbol: "btc_usdt"
       period: 50
-    - name: "SMA_200"
-      symbol: "eth_btc"
+    - name: "SMA_200_BTCUSDT"
+      symbol: "btc_usdt"
       period: 200
+    - name: "SMA_50_ETHBTC"
+      symbol: "eth_btc"
+      period: 50
+    - name: "SMA_100_ETHBTC"
+      symbol: "eth_btc"
+      period: 100
+
+  ema:
+    - name: "EMA_12_BTCUSDT"
+      symbol: "btc_usdt"
+      period: 12
+    - name: "EMA_26_BTCUSDT"
+      symbol: "btc_usdt"
+      period: 26
+    - name: "EMA_50_BTCUSDT"
+      symbol: "btc_usdt"
+      period: 50
+
   rsi:
-    - name: "RSI_14"
+    - name: "RSI_14_BTCUSDT"
       symbol: "btc_usdt"
       period: 14
+    - name: "RSI_7_ETHBTC"
+      symbol: "eth_btc"
+      period: 7
+
   macd:
-    - name: "MACD_12_26_9"
+    - name: "MACD_12_26_9_BTCUSDT"
       symbol: "btc_usdt"
       fast_period: 12
       slow_period: 26
       signal_period: 9
+    - name: "MACD_5_10_5_ETHBTC"
+      symbol: "eth_btc"
+      fast_period: 5
+      slow_period: 10
+      signal_period: 5
+
+  # Add other indicator types as needed (e.g., BollingerBands, Stochastic, etc.)
+  # bolliger_bands:
+  #   - name: "BB_20_2_BTCUSDT"
+  #     symbol: "btc_usdt"
+  #     period: 20
+  #     std_dev_multiplier: 2.0
