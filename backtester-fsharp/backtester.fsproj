@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <GenerateProgramFile>false</GenerateProgramFile>
+    <RootNamespace>BacktesterFsharp</RootNamespace>
+    <AssemblyName>backtester-fsharp</AssemblyName>
+    <WarnOn>3389;3511;558;1030</WarnOn> <OtherFlags>--warnon:1182</OtherFlags> </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src/Config.fs" />
+    <Compile Include="src/Dsl/Ast.fs" />
+    <Compile Include="src/Dsl/Lexer.fsl" /> <Compile Include="src/Dsl/Parser.fsy" /> <Compile Include="src/Dsl/Lexer.fs" />
+    <Compile Include="src/Dsl/Parser.fs" />
+    <Compile Include="src/Dsl/Interpreter.fs" />
+    <Compile Include="src/Data/HistoricalDataLoader.fs" />
+    <Compile Include="src/MlTesting/MlTestingClient.fs" /> <Compile Include="src/Simulation/SimulationTypes.fs" />
+    <Compile Include="src/Simulation/SimulationEngine.fs" />
+    <Compile Include="src/Metrics/MetricsCalculator.fs" />
+    <Compile Include="src/BacktesterService.fs" /> <Compile Include="src/Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" Version="8.0.200" />
+    <PackageReference Include="FSharp.Configuration" Version="2.0.0" /> <PackageReference Include="CsvHelper" Version="31.0.0" /> <PackageReference Include="MathNet.Numerics" Version="5.0.0" /> <PackageReference Include="System.Text.Json" Version="8.0.0" /> <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
+    <PackageReference Include="FsLexYacc.Runtime" Version="11.1.1" /> <PackageReference Include="FsLexYacc" Version="11.1.1" > <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+       <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+     </ItemGroup>
+
+  <Target Name="GenerateParserAndLexer" BeforeTargets="BeforeCompile">
+      <Exec Command="dotnet fsharp $(MSBuildProjectDirectory)/src/Dsl/Lexer.fsl -o $(MSBuildProjectDirectory)/src/Dsl/Lexer.fs" />
+      <Exec Command="dotnet fsharp $(MSBuildProjectDirectory)/src/Dsl/Parser.fsy -o $(MSBuildProjectDirectory)/src/Dsl/Parser.fs --module Parser" />
+  </Target>
+
+</Project>

@@ -1,0 +1,230 @@
+%{
+// src/Dsl/Parser.fsy
+module BacktesterFsharp.Dsl.Parser
+
+open BacktesterFsharp.Dsl.Ast
+open BacktesterFsharp.Dsl.Lexer // Needs the Lexer module
+open FSharp.Text.Lexing
+open System.Collections.Generic // For Dictionary
+
+// Define the type of the token stream and the value returned by the parser
+type token = Lexer.token
+type ParseResult = Strategy
+
+// Helper to get position information for errors
+let pos (lexbuf: LexBuffer<char>) =
+    let p = lexbuf.EndPos
+    let file = p.FileName
+    let line = p.Line
+    let col = p.Column
+    sprintf "file %s, line %d, column %d" file line col
+
+// Helper for error reporting
+let parse_error (lexbuf: LexBuffer<char>) msg =
+    failwithf "Parsing error at %s: %s" (pos lexbuf) msg
+
+// Helper to extract VAR_DECLs and other statements
+let rec extractVarDecls (stmts: Statement list) =
+    match stmts with
+    | [] -> [], []
+    | VarDecl(name, initialValue) :: rest ->
+        let decls, other = extractVarDecls rest
+        (name, initialValue) :: decls, other
+    | otherStmt :: rest ->
+        let decls, other = extractVarDecls rest
+        decls, otherStmt :: other
+
+// Helper to evaluate a constant expression (used for VAR initial values)
+let rec evalConstantExpr (expr: Expr) : Value =
+    match expr with
+    | Const v -> v
+    | BinOp (op, e1, e2) ->
+        let v1 = evalConstantExpr e1
+        let v2 = evalConstantExpr e2
+        match op, v1, v2 with
+        | Add, Numeric f1, Numeric f2 -> Numeric (f1 + f2)
+        | Sub, Numeric f1, Numeric f2 -> Numeric (f1 - f2)
+        | Mul, Numeric f1, Numeric f2 -> Numeric (f1 * f2)
+        | Div, Numeric f1, Numeric f2 -> Numeric (if f2 <> 0m then f1 / f2 else 0m) // Simulate div by zero result with 0m
+        | Eq, _, _ -> Boolean (v1 = v2) // Structural equality
+        | Neq, _, _ -> Boolean (v1 <> v2)
+        | Lt, Numeric f1, Numeric f2 -> Boolean (f1 < f2)
+        | Gt, Numeric f1, Numeric f2 -> Boolean (f1 > f2)
+        | Leq, Numeric f1, Numeric f2 -> Boolean (f1 <= f2)
+        | Geq, Numeric f1, Numeric f2 -> Boolean (f1 >= f2)
+        | And, Boolean b1, Boolean b2 -> Boolean (b1 && b2)
+        | Or, Boolean b1, Boolean b2 -> Boolean (b1 || b2)
+        | _, _, _ -> parse_error lexbuf (sprintf "Type error during constant expression evaluation: %A %A %A" op v1 v2)
+    | BuiltinFunc (func, args) ->
+         let argValues = List.map evalConstantExpr args
+         match func, argValues with
+         | Abs, [Numeric f] -> Numeric (System.Decimal.Abs(f))
+         | Min, [Numeric f1; Numeric f2] -> Numeric (min f1 f2)
+         | Max, [Numeric f1; Numeric f2] -> Numeric (max f1 f2)
+         | _, _ -> parse_error lexbuf (sprintf "Type error during constant built-in function evaluation: %A %A" func argValues)
+    | _ -> parse_error lexbuf (sprintf "Cannot evaluate non-constant expression at parse time: %A" expr)
+
+// Helper to convert list of (name, value) to Dictionary
+let listToDictionary (items: (string * Value) list) =
+    let dict = new Dictionary<string, Value>()
+    for (name, value) in items do
+        if dict.ContainsKey(name) then
+            parse_error lexbuf (sprintf "Duplicate variable declaration: %s" name)
+        dict.Add(name, value)
+    dict
+
+%}
+
+// Define tokens used in the grammar
+%token <decimal> FLOAT
+%token <string> ID
+%token <string> STRING
+%token PLUS MINUS TIMES DIV
+%token EQ NEQ LT GT LEQ GEQ
+%token AND OR
+%token LPAREN RPAREN LBRACE RBRACE SEMICOLON COMMA DOT
+%token K_STRATEGY K_ON K_DataUpdate K_IF K_THEN K_ELSE K_BUY K_SELL K_HOLD K_Log K_VAR K_SET K_prev K_Indicator K_Prediction
+%token K_TRUE K_FALSE K_NAN
+%token K_ABS K_MIN K_MAX
+%token ASSIGN
+%token EOF
+
+// Define precedence and associativity
+%left OR
+%left AND
+%left EQ NEQ LT GT LEQ GEQ
+%left PLUS MINUS
+%left TIMES DIV
+
+// Define the start symbol
+%start strategy
+
+// Grammar rules
+%%
+
+strategy:
+    K_STRATEGY ID SEMICOLON strategy_body_statements EOF
+        {
+            let varDecls, otherStmts = extractVarDecls $4
+            let initialDict = listToDictionary (List.map (fun (name, expr) -> (name, evalConstantExpr expr)) varDecls)
+            { Name = $2; InitialState = initialDict; Logic = otherStmts }
+        }
+
+strategy_body_statements:
+    LBRACE statements RBRACE
+        { $2 }
+    | K_ON LPAREN STRING RPAREN LBRACE statements RBRACE // Handle ON block, extract inner statements
+        { $6 } // Return the list of statements inside the ON block
+
+statements:
+    statement SEMICOLON statements
+        { $1 :: $3 }
+    | statement // Allow last statement without semicolon
+        { [$1] }
+    | // empty
+        { [] }
+
+statement:
+    K_IF expr K_THEN LBRACE statements RBRACE K_ELSE LBRACE statements RBRACE
+        { If($2, $5, $9) }
+    | K_IF expr K_THEN LBRACE statements RBRACE
+        { If($2, $5, []) } // No ELSE block
+    | action
+        { Action($1) }
+    | K_VAR ID ASSIGN expr
+        { VarDecl($2, $4) }
+    | K_SET ID ASSIGN expr
+        { SetVar($2, $4) }
+
+action:
+    K_BUY expr
+        { Buy($2) }
+    | K_SELL expr
+        { Sell($2) }
+    | K_HOLD
+        { Hold }
+    | K_Log LPAREN expr RPAREN
+        { Log($3) }
+
+expr:
+    bool_expr
+        { $1 }
+
+bool_expr:
+    bool_expr OR and_expr
+        { BinOp(Or, $1, $3) }
+    | and_expr
+        { $1 }
+
+and_expr:
+    and_expr AND comp_expr
+        { BinOp(And, $1, $3) }
+    | comp_expr
+        { $1 }
+
+comp_expr:
+    arith_expr EQ arith_expr
+        { BinOp(Eq, $1, $3) }
+    | arith_expr NEQ arith_expr
+        { BinOp(Neq, $1, $3) }
+    | arith_expr LT arith_expr
+        { BinOp(Lt, $1, $3) }
+    | arith_expr GT arith_expr
+        { BinOp(Gt, $1, $3) }
+    | arith_expr LEQ arith_expr
+        { BinOp(Leq, $1, $3) }
+    | arith_expr GEQ arith_expr
+        { BinOp(Geq, $1, $3) }
+    | arith_expr
+        { $1 }
+
+arith_expr:
+    arith_expr PLUS term
+        { BinOp(Add, $1, $3) }
+    | arith_expr MINUS term
+        { BinOp(Sub, $1, $3) }
+    | term
+        { $1 }
+
+term:
+    term TIMES factor
+        { BinOp(Mul, $1, $3) }
+    | term DIV factor
+        { BinOp(Div, $1, $3) }
+    | factor
+        { $1 }
+
+factor:
+    FLOAT
+        { Const(Numeric $1) }
+    | K_NAN
+        { Const(Numeric System.Decimal.Zero / System.Decimal.Zero) } // Represent NaN as 0/0 decimal division
+    | ID
+        { GetVar($1) } // Assume ID is a variable
+    | K_Indicator LPAREN STRING RPAREN
+        { GetIndicator($3) }
+    | K_Prediction LPAREN STRING RPAREN
+        { GetPrediction($3) }
+    | K_Indicator LPAREN STRING RPAREN DOT K_prev
+        { GetPrevIndicator($3) }
+    | K_Prediction LPAREN STRING RPAREN DOT K_prev
+        { GetPrevPrediction($3) }
+    | K_TRUE
+        { Const(Boolean true) }
+    | K_FALSE
+        { Const(Boolean false) }
+    | builtin_func_call
+        { $1 }
+    | LPAREN expr RPAREN
+        { $2 }
+
+builtin_func_call:
+    K_ABS LPAREN expr RPAREN
+        { BuiltinFunc(Abs, [$3]) }
+    | K_MIN LPAREN expr COMMA expr RPAREN
+        { BuiltinFunc(Min, [$3; $5]) }
+    | K_MAX LPAREN expr COMMA expr RPAREN
+        { BuiltinFunc(Max, [$3; $5]) }
+    // Add other built-in functions here following the pattern
+
+%%

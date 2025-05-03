@@ -1,0 +1,22 @@
+# Configuration for the F# Backtester Service
+
+grpc:
+  listen_address: "0.0.0.0:50054" # Address where this service listens for backtest requests
+
+data:
+  # Path to the directory containing historical data files (e.g., CSV)
+  # File names should match symbols (e.g., btc_usdt.csv for btc_usdt symbol)
+  history_data_path: "data/history"
+
+simulation:
+  # Default initial capital if not specified in the request
+  default_initial_capital: 10000.0
+  # Default trading fees (e.g., 0.1% per trade)
+  maker_fee: 0.0001
+  taker_fee: 0.0007
+  # Slippage simulation (e.g., add/subtract a small percentage to fill price)
+  slippage_percent: 0.0005 # 0.05% slippage
+
+metrics:
+  # Risk-free rate for Sharpe ratio calculation (e.g., 0.0 for simplicity)
+  risk_free_rate: 0.0

@@ -18,6 +18,12 @@ message BacktestRequest {
   google.protobuf.Timestamp start_time = 4; // Historical data start time
   google.protobuf.Timestamp end_time = 5;   // Historical data end time
   double initial_capital = 6;  // Starting capital for the backtest
+
+  // Fields for specifying an ML model to use for historical predictions
+  // If these are empty, the backtest uses only available market data and potentially hardcoded logic.
+  optional string ml_model_id = 7;
+  optional string ml_model_version = 8;
+
   // Add other parameters like trading fees, slippage settings, etc.
 }
 
@@ -30,6 +36,9 @@ message BacktestResponse {
   int32 total_trades = 6;    // Number of trades executed
   // Add other relevant metrics (e.g., win rate, profit factor, list of trades)
   repeated BacktestTrade trade_history = 7; // Optional: list of trades
+  double win_rate = 9; // Added metric
+  double profit_factor = 10; // Added metric
+  double sortino_ratio = 11; // Added metric
 
 }
 

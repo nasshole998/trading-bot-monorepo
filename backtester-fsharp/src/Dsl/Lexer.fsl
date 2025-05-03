@@ -1,0 +1,93 @@
+{
+// src/Dsl/Lexer.fsl
+module BacktesterFsharp.Dsl.Lexer
+
+open FSharp.Text.Lexing
+open BacktesterFsharp.Dsl.Parser // Needs the Parser module to define token types
+
+let lexer_error (lexbuf: LexBuffer<char>) msg =
+    let pos = lexbuf.EndPos
+    let startPos = lexbuf.StartPos
+    let line = pos.Line
+    let column = pos.Column
+    let startColumn = startPos.Column
+    let lineText = (lexbuf.Buffer |> fun buffer ->
+        let lineStart = lexbuf.Buffer.IndexOf('\n', startPos.AbsolutePos - startColumn)
+        let lineEnd = lexbuf.Buffer.IndexOf('\n', pos.AbsolutePos)
+        let len = if lineEnd = -1 then lexbuf.Buffer.Length - (lineStart + 1) else lineEnd - (lineStart + 1)
+        lexbuf.Buffer.Substring(lineStart + 1, len)
+    )
+    failwithf "Lexing error at line %d, column %d: %s\nLine: %s" line startColumn msg lineText
+
+}
+
+// Define single-line comments starting with #
+let comment = '#' [^\n]*
+
+rule token = parse
+    | [' ' '\t' '\r' '\n'] { token lexbuf } // Skip whitespace including carriage return
+    | comment { token lexbuf } // Skip comments
+
+    | ['0'-'9']+ '.' ['0'-'9']*
+    | '.' ['0'-'9']+ { FLOAT (decimal.Parse(Lexing.lexeme lexbuf, System.Globalization.CultureInfo.InvariantCulture)) } // Parse numbers as decimal, use invariant culture
+    | ['0'-'9']+ { FLOAT (decimal.Parse(Lexing.lexeme lexbuf, System.Globalization.CultureInfo.InvariantCulture)) } // Handle integers as floats/decimals
+
+    | '+' { PLUS }
+    | '-' { MINUS }
+    | '*' { TIMES }
+    | '/' { DIV }
+    | '=' { ASSIGN }
+    | "==" { EQ }
+    | "!=" { NEQ }
+    | '<' { LT }
+    | '>' { GT }
+    | "<=" { LEQ }
+    | ">=" { GEQ }
+    | "&&" { AND }
+    | "||" { OR }
+    | '(' { LPAREN }
+    | ')' { RPAREN }
+    | '{' { LBRACE }
+    | '}' { RBRACE }
+    | ';' { SEMICOLON }
+    | ',' { COMMA }
+    | '.' { DOT }
+
+    // Keywords
+    | "STRATEGY" { K_STRATEGY }
+    | "ON" { K_ON }
+    | "DataUpdate" { K_DataUpdate }
+    | "IF" { K_IF }
+    | "THEN" { K_THEN }
+    | "ELSE" { K_ELSE }
+    | "BUY" { K_BUY }
+    | "SELL" { K_SELL }
+    | "HOLD" { K_HOLD }
+    | "Log" { K_Log }
+    | "VAR" { K_VAR }
+    | "SET" { K_SET }
+    | "prev" { K_prev }
+    | "Indicator" { K_Indicator }
+    | "Prediction" { K_Prediction }
+
+    // Built-in functions
+    | "ABS" { K_ABS }
+    | "MIN" { K_MIN }
+    | "MAX" { K_MAX }
+
+    // Boolean constants
+    | "true" { K_TRUE }
+    | "false" { K_FALSE }
+    | "NaN" { K_NAN } // Add NaN constant
+
+    | alpha (alphanumeric | '_')* as s { ID s } // Identifiers
+
+    | '"' ([^'"'\\] | '\\'.)* '"' as s { // Allow escaped quotes inside strings
+        let content = s.Substring(1, s.Length - 2)
+        // Basic unescaping if needed, e.g., replace \\" with "
+        STRING content
+      }
+
+    | eof { EOF }
+
+    | _ { lexer_error lexbuf (sprintf "Unexpected character: '%s'" (Lexing.lexeme lexbuf)) } // Catch-all for errors
