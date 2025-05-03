@@ -1,0 +1,71 @@
+# Example Configuration for ML Engine Service
+
+# gRPC server configuration for this service (receives market data, serves predictions)
+grpc:
+  listen_address: "0.0.0.0:50052" # Address where this service listens
+
+# HTTP health check server configuration
+health_check:
+  listen_address: "0.0.0.0:8081" # Address for health checks
+
+# Configuration for data management
+data:
+  max_history_size: 2000 # Maximum number of recent market data points AND indicator points to store per symbol
+
+# Configuration for ML models
+model:
+  artifacts_path: "models" # Directory to load/save trained models from/to
+  instances: # List of model instances to load/manage
+    - name: "LSTM_PriceForecast_BTCUSDT" # Unique name for this instance
+      type: "FluxLSTM" # Type of model
+      symbol: "btc_usdt" # Symbol this model is trained for
+      required_data_points: 100 # Lookback window size needed for prediction/training sequence
+      model_file: "lstm_btc_usdt.bson" # File name for this model's artifacts
+      # Parameters specific to FluxLSTM architecture
+      lstm_hidden_size: 64 # Example LSTM hidden layer size
+      output_features: 1 # Example number of output features (e.g., 1 for price forecast)
+
+    - name: "RuleBased_Arbitrage_ETHBTC"
+      type: "RuleBased" # Example: Could also have non-ML "models"
+      symbol: "eth_btc"
+      required_data_points: 1 # Example: Only needs the latest data
+      # Rule-based models don't have training/model_file
+
+    # Add config for other models
+    # - name: "Mojo_LowLatency_Predictor_BTCUSDT"
+    #   type: "MojoModel" # This model type relies on Mojo implementation
+    #   symbol: "btc_usdt"
+    #   required_data_points: 50
+    #   mojo_model_path: "mojo/compiled/btc_usdt_model.bin" # Path to Mojo artifact (placeholder)
+
+# Configuration for the prediction types to expose via gRPC
+predictions:
+  expose: # List of prediction types to make available for subscription
+    - type: "price_forecast_next_tick" # Predict the price of the next tick
+      symbol: "btc_usdt" # Which symbol this prediction relates to
+      # Optional: Link to a specific model name if not implicit by symbol/type
+      # model_name: "LSTM_PriceForecast_BTCUSDT" # This link is currently handled by finding model config matching symbol
+
+    - type: "arbitrage_opportunity_signal" # Binary signal (e.g., 0 or 1)
+      symbol: "eth_btc"
+      # model_name: "RuleBased_Arbitrage_ETHBTC" # This link is currently handled by finding model config matching symbol
+
+    # Add other prediction types
+    # - type: "buy_signal"
+    #   symbol: "btc_usdt"
+    #   # model_name: "LSTM_PriceForecast_BTCUSDT" # Or another classification model
+
+
+# Configuration for online training
+training:
+  enabled: true # Set to false to disable online training
+  interval_sec: 1800 # Trigger training every 30 minutes (in seconds)
+  initial_delay_sec: 120 # Wait 2 minutes before the very first training trigger
+  data_size: 1500 # Use the last 1500 data points from history for each retraining cycle
+  # Parameters for the training process (applies to learnable models like FluxLSTM)
+  epochs: 20 # Number of training epochs per cycle
+  learning_rate: 0.0005 # Learning rate for the optimizer
+
+# Configuration for connecting to the Indicator Engine
+indicator_engine:
+  grpc_address: "localhost:50051" # Address of the Indicator Engine gRPC server

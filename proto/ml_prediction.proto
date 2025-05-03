@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package ml_prediction;
+
+import "google/protobuf/timestamp.proto";
+// Potentially import market_data.proto or indicator_data.proto if prediction
+// messages need to embed fields from those.
+
+// Service for streaming computed ML predictions/signals to consumers (e.g., Strategy Engine).
+service PredictionService {
+  // Server-side streaming RPC to subscribe to prediction updates.
+  // The client (Strategy Engine) calls this, and the server (ML Engine) streams updates.
+  rpc SubscribeToPredictions(PredictionSubscriptionRequest) returns (stream PredictionValue);
+
+  // Optional: Unary RPC to get the latest prediction for a specific symbol/type.
+  // rpc GetLatestPrediction(GetPredictionRequest) returns (PredictionValue);
+}
+
+message PredictionSubscriptionRequest {
+  // Define what the client wants to subscribe to.
+  // Could be a list of symbols, specific prediction types, or just subscribe to all updates.
+  repeated string symbols = 1;
+  repeated string prediction_types = 2; // e.g., ["buy_signal", "sell_signal", "price_forecast"]
+  // If empty lists, maybe subscribe to everything.
+}
+
+// message GetPredictionRequest {
+//   string symbol = 1;
+//   string prediction_type = 2;
+// }
+
+message PredictionValue {
+  string exchange = 1;         // e.g., "binance"
+  string symbol = 2;           // e.g., "btc_usdt" (normalized)
+  string prediction_type = 3;  // e.g., "buy_signal", "price_forecast"
+  string value = 4;            // Use string for numerical value representation
+  google.protobuf.Timestamp timestamp = 5; // Timestamp of the data point the prediction is based on
+  // Add confidence score or other metadata if applicable
+  optional string metadata = 6; // Optional field for JSON or string metadata
+}

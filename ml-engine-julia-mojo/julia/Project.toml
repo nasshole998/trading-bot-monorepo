@@ -1,61 +1,36 @@
-# ml-engine-julia-mojo/julia/Project.toml
-[name]
-name = "MLEngine" # Julia project name
-uuid = "f3d8e1b2-c4a5-4f6d-8a7b-9e0d1c2f3a4b" # Generate a unique UUID (e.g., using `using UUIDs; uuid4()`)
+name = "MLEngine"
+uuid = uuid = "0b15a152-0e73-4991-b627-14197670c46c"
+authors = ["Nick <nikolas.spyridonidis@gmail.com>"]
 version = "0.1.0"
-authors = [Nick] # Replace with actual author info
 
 [deps]
-# Core ML & Data Handling
-Flux = "587475ba-b771-5e3f-ad9e-337990487a14" # Neural networks & ML tools
-MLJ = "add582a8-e3ab-11e8-2d5e-e98b27df1bc2"   # Machine Learning Framework (optional, if using models beyond Flux)
-DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0" # Tabular data handling
-CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d09b"       # Reading CSV data
-BSON = "fbb4 BSON" # Saving/Loading Julia objects (including models)
-Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2" # Basic stats (mean, std)
-Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"     # Date/time handling
+gRPC = "..."       # <--- REPLACE THIS WITH THE UUID FOR gRPC.jl
+ProtoBuf = "..."   # <--- REPLACE THIS WITH THE UUID FOR ProtoBuf.jl
+YAML = "..."       # <--- REPLACE THIS WITH THE UUID FOR YAML.jl
+Dates = "..."      # Standard library (no UUID needed in deps)
+CircularArrays = "..." # <--- REPLACE THIS WITH THE UUID FOR CircularArrays.jl
+DataFrames = "..." # <--- REPLACE THIS WITH THE UUID FOR DataFrames.jl
+Flux = "..."       # <--- REPLACE THIS WITH THE UUID FOR Flux.jl
+CUDA = "..."       # <--- REPLACE THIS WITH THE UUID FOR CUDA.jl (Optional if not using GPU)
+NNlib = "..."      # <--- REPLACE THIS WITH THE UUID FOR NNlib.jl
+BSON = "..."       # <--- REPLACE THIS WITH THE UUID FOR BSON.jl
+HTTP = "..."       # <--- REPLACE THIS WITH THE UUID FOR HTTP.jl
+Logging = "..."    # Standard library (no UUID needed in deps)
+JSON = "..."       # <--- REPLACE THIS WITH THE UUID FOR JSON.jl
+ArgParse = "..."   # <--- REPLACE THIS WITH THE UUID FOR ArgParse.jl
+FileWatching = "..." # Standard library (no UUID needed in deps)
+SignalInterrupt = "..." # <--- REPLACE THIS WITH THE UUID FOR SignalInterrupt.jl
+Statistics = "..." # Standard library (no UUID needed in deps)
+Random = "     # Standard library (no UUID needed in deps) # Added for shuffling
+Base64 =      # Standard library (no UUID needed in deps) # Might be needed by ProtoBuf/gRPC
 
-# gRPC & Networking
-ProtoBuf = "348 BSON" # Protocol Buffers serialization
-gRPC = "478 BSON"    # gRPC framework
-Sockets = "6462fe0b-24de-5631-8697-dd941f90decc" # Networking base
-
-# Configuration & Logging
-Configurations = "51 BSON" # Loading config files (e.g., TOML)
-Logging = "56ddb016-857b-54e1-8ae3-2879b6ec6ab9" # Standard logging
-LoggingExtras = "e6f89c97-d68a-5fd Sockets" # Advanced logging config (e.g., file sinks)
-
-# Utilities
-UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"     # Generating unique IDs
-Printf = "de08 BSON" # Formatting strings
-
-# GPU Support (Uncomment if needed)
-# CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
-# cuDNN = "7a07 BSON" # Optional, if using cuDNN specific features
-
-# Mojo Integration (Placeholder - Requires a suitable Julia package or manual FFI)
-# Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb" # Standard library for dynamic library loading (FFI)
 
 [compat]
-julia = "1.9" # Minimum Julia version required
-Flux = "0.13"
-MLJ = "0.19"
-DataFrames = "1.5"
-CSV = "0.10"
-BSON = "0.3"
-ProtoBuf = "1.0"
-gRPC = "0.5"
-Configurations = "0.11"
-LoggingExtras = "1.0"
-# Add compat bounds for other dependencies
-# CUDA = "5.0" # Example if using CUDA
+julia = "1.9" # Or your target Julia version
 
-# Optional: Define build script
+# Add any test dependencies in a [extras] and [targets] section if needed
 # [extras]
-# Build = "build.jl"
+# Test = "..." # UUID for the built-in Test stdlib
 
-# Optional: Define targets (e.g., for PackageCompiler.jl)
 # [targets]
-# system_image = ["PackageCompiler"]
-```
-**Note:** Run `using Pkg; Pkg.add("UUIDs"); using UUIDs; uuid4()` in a Julia REPL to generate a unique UUID for your project. Also, run `Pkg.resolve()` in the `julia/` directory after creating `Project.toml` to generate the `Manifest.toml` fi
+# test = ["Test"]

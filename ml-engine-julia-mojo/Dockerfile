@@ -1,117 +1,111 @@
-# ml-engine-julia-mojo/Dockerfile
+# Stage 1: Build/Setup the Julia environment
+# Use a Julia image that includes necessary tools and potentially CUDA drivers/toolkit
+# Finding a base image with CUDA drivers AND Julia pre-installed is ideal for GPU usage.
+# If not available, you might need to start from an NVIDIA CUDA image and install Julia.
+# Let's use a standard Julia image and add CUDA toolkit if needed for the build stage,
+# assuming a CUDA runtime image will be used for deployment (Stage 2).
+# FROM julia:1.9-bookworm as builder # Using a specific Julia version on Debian bookworm
+FROM julia:1.10.0 as builder 
 
-# --- Builder Stage ---
-# Use an official Julia base image. Pin the version for reproducibility.
-# Choose appropriate base (e.g., ubuntu) if needing specific system libs.
-# Use NVIDIA CUDA base if GPU support is required.
-ARG JULIA_VERSION=1.9.4 # Specify desired Julia version
-ARG BASE_IMAGE=julia:${JULIA_VERSION}-bullseye
-ARG CUDA_VERSION=12.1.1 # Match CUDA version if using GPU
-ARG CUDNN_VERSION=8
-ARG USE_GPU=false
-
-FROM ${BASE_IMAGE} as base
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn${CUDNN_VERSION}-devel-ubuntu22.04 as gpu_base
-
-FROM ${gpu_base} as builder_gpu_base
-FROM base as builder_cpu_base
-
-# Select base based on USE_GPU
-FROM builder_${USE_GPU}_base as builder
-
-ARG DEBIAN_FRONTEND=noninteractive
-ENV JULIA_DEPOT_PATH="/opt/julia_depot" \
-    JULIA_PROJECT="/app"
-
-# Install build dependencies (e.g., for specific Julia packages, protoc)
-# protoc might be needed if build.jl runs protoc binary directly
+# Install system dependencies (for Protoc, and any libs Julia packages might need)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    # protobuf-compiler # Uncomment if build.jl needs it explicitly
-    # Add python3 and build tools if building Mojo shared library here
-    python3 python3-pip build-essential \
-    # Clean up
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    protobuf-compiler \
+    # libyaml-cpp-dev # Only if YAML.jl needs this explicitly
+    # Add dependencies for CUDA toolkit if building/training on CPU image
+    # (e.g., if Flux.jl needs CUDA libraries for compilation even on CPU)
+    # Add dependencies for Mojo compilation if happening here (less likely)
+    && rm -rf /var/lib/apt/lists/*
 
-# Create app directory and Julia depot path
+# Install CUDA toolkit if building/training with GPU on a non-CUDA base image
+# This is complex and depends on the base image.
+# If using an NVIDIA base image, CUDA toolkit might be partially available or needs full install.
+# Example (conceptual - depends on base image and CUDA version):
+# ENV CUDA_VERSION=12.3.1
+# RUN apt-get update && apt-get install -y --no-install-recommends \
+#    cuda-toolkit-$CUDA_VERSION \
+#    && rm -rf /var/lib/apt/lists/*
+# ENV PATH="/usr/local/cuda/bin:${PATH}"
+# ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+
+
 WORKDIR /app
-RUN mkdir -p ${JULIA_DEPOT_PATH}
 
 # Copy Julia project files
-COPY ./julia/Project.toml ./julia/Manifest.toml* ./
-# If Manifest.toml doesn't exist yet, create dummy to avoid error
-RUN touch Manifest.toml
+COPY ml-engine-julia-mojo/julia/Project.toml ./julia/Project.toml
+COPY ml-engine-julia-mojo/julia/Manifest.toml ./julia/Manifest.toml 
 
-# Pre-install Julia dependencies to leverage Docker layer caching
-# Instantiate installs packages, resolve ensures Manifest is up-to-date
-RUN julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.resolve(); Pkg.precompile()'
+# Instantiate Julia dependencies (resolves and downloads packages)
+# This is crucial for reproducible builds
+RUN julia --project=./julia/ -e 'using Pkg; Pkg.instantiate()'
 
-# Copy the rest of the Julia source code and build script
-COPY ./julia/src ./src
-COPY ./julia/build.jl ./build.jl
-COPY ./julia/config ./config
-# Copy proto definitions needed for build.jl
-COPY ./proto /proto
+# Copy source code and config
+COPY ml-engine-julia-mojo/julia/src/ ./julia/src/
+COPY ml-engine-julia-mojo/config/ ./config/
+# Copy models directory (initial models)
+COPY ml-engine-julia-mojo/models/ ./models/
 
-# Run the Julia build script to generate gRPC code
-# Ensure necessary proto files (including google/protobuf) are accessible
-RUN julia --project=. build.jl
 
-# --- Mojo Build (Optional - Placeholder) ---
-# Copy Mojo source and build script
-COPY ./mojo /app/mojo
-WORKDIR /app/mojo
-# Placeholder: Install Mojo SDK (this needs a real installation method)
-# RUN curl ... | sh install_mojo.sh
-# Placeholder: Build the Mojo shared library
-# RUN bash build.sh
-WORKDIR /app # Return to main app directory
+# --- Protobuf Compilation (Julia) ---
+# Need protoc and the Julia gRPC plugin.
+# The Julia gRPC plugin is usually part of the gRPC.jl package and found automatically by protoc
+# if `julia --project=./julia/ -e 'using gRPC'` works.
 
-# --- Runtime Stage ---
-# Use a minimal Julia base image (or NVIDIA base if using GPU)
-ARG JULIA_VERSION
-ARG BASE_IMAGE_RUNTIME=julia:${JULIA_VERSION}-bullseye-slim
-ARG CUDA_VERSION_RUNTIME=12.1.1
-ARG USE_GPU
+# Copy proto files from the monorepo root
+COPY proto/ ./proto/
 
-FROM ${BASE_IMAGE_RUNTIME} as runtime_base
-FROM nvidia/cuda:${CUDA_VERSION_RUNTIME}-base-ubuntu22.04 as gpu_runtime_base
+# Command to compile protos using Julia's gRPC build helper
+# This typically uses `protoc` with `--julia_out` and `--plugin` pointing to the Julia plugin.
+# The exact command and plugin path depend on the gRPC.jl version and installation.
+# Example (conceptual - relies on gRPC.jl setting up the plugin path):
+RUN mkdir -p ./julia/src/generated # Create output dir
+# Need to figure out the correct protoc command and plugin path in the Docker environment.
+# A common way is to run a Julia script that uses `gRPC.generate_proto_code`.
+# Example Julia script:
+# ```julia
+# import gRPC
+# gRPC.generate_proto_code(["proto/market_data.proto", "proto/indicator_data.proto", "proto/ml_prediction.proto"], output_dir="./julia/src/generated")
+# ```
+# RUN julia --project=./julia/ -e 'import gRPC; gRPC.generate_proto_code(["proto/market_data.proto", "proto/indicator_data.proto", "proto/ml_prediction.proto"], output_dir="./julia/src/generated")'
+# Placeholder command if the above doesn't work directly:
+RUN echo "Placeholder: Run protoc manually or via Julia script using gRPC.generate_proto_code"
+# A manual command might look like this, but finding the plugin path is tricky in Docker:
+# RUN protoc -I. --plugin=protoc-gen-julia=/path/to/julia/grpc/plugin --julia_out=./julia/src/generated proto/market_data.proto proto/indicator_data.proto proto/ml_prediction.proto
 
-FROM ${gpu_runtime_base} as runtime_gpu_base
-FROM runtime_base as runtime_cpu_base
 
-FROM runtime_${USE_GPU}_base as runtime
+# --- Mojo Compilation (Optional/Placeholder) ---
+# Copy Mojo files (if building Mojo code)
+COPY ml-engine-julia-mojo/mojo/ ./mojo/
+# Run the Mojo build script (placeholder)
+# Ensure Mojo SDK is available in the builder image if needed for compilation
+# RUN ./mojo/build.sh
+# COPY mojo/compiled_artifact ./julia/src/ # Copy compiled Mojo artifact
 
-ARG DEBIAN_FRONTEND=noninteractive
-ENV JULIA_DEPOT_PATH="/opt/julia_depot" \
-    JULIA_PROJECT="/app" \
-    JULIA_NUM_THREADS=auto # Use multiple threads based on CPU cores
 
-# Install runtime dependencies (e.g., libprotobuf, potentially Python for Mojo runtime)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libprotobuf32 \
-    # python3 # If Mojo runtime needs it
-    # Clean up
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Stage 2: Create the final small image (Optional for Julia)
+# Use an NVIDIA CUDA runtime image if your application needs GPU drivers/runtime at deployment
+# If not using GPU, the builder image might be sufficient, or use a smaller base image.
+FROM nvidia/cuda:12.3.1-runtime-ubuntu22.04 as runtime 
+
+# Install Julia on the runtime image (if not using a Julia base image with CUDA)
+# Example (depends on Julia distribution method):
+# RUN apt-get update && apt-get install -y julia=1.10.0 && rm -rf /var/lib/apt/lists/*
+
+# Copy Julia environment, source code, config, and models from the builder stage
+COPY --from=builder /app/julia/ ./julia/
+COPY --from=builder /app/config/ ./config/
+COPY --from=builder /app/models/ ./models/
+COPY --from=builder /app/proto/ ./proto/ 
+
 
 WORKDIR /app
 
-# Copy necessary files from the builder stage
-COPY --from=builder ${JULIA_DEPOT_PATH} ${JULIA_DEPOT_PATH}
-COPY --from=builder /app/Project.toml /app/Manifest.toml ./
-COPY --from=builder /app/src ./src
-COPY --from=builder /app/config ./config
-# Copy trained models (can also be mounted as a volume)
-COPY ./models /app/models
-# Copy compiled Mojo shared library (if built)
-# COPY --from=builder /app/mojo/libmodel_inference.so /app/mojo/
+# Set the entrypoint to run your main Julia script
+# Use `--threads=auto` to utilize available CPU cores
+ENTRYPOINT ["julia", "--project=./julia/", "--threads=auto", "./julia/src/main.jl"]
 
-# Expose the gRPC server port (must match config)
-EXPOSE 50053
+# Default command (optional)
+# CMD []
 
-# Set the entrypoint to run the Julia application
-# Use --project to specify the environment
-# Add --threads=auto (or specific number) for multi-threading
-# Add command line args for config if needed
-CMD ["julia", "--project=.", "--threads=$JULIA_NUM_THREADS", "src/MLEngine.jl", "--port=50053"]
-
+# Expose ports (optional, for documentation)
+EXPOSE 50052 
+EXPOSE 8081 
