@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package backtester;
+
+import "google/protobuf/timestamp.proto";
+import "market_data.proto"; // To potentially reuse OrderSide, OrderType enums
+
+// Service for requesting strategy backtests
+service BacktesterService {
+  // RPC to submit a strategy definition and get backtest results
+  rpc BacktestStrategy(BacktestRequest) returns (BacktestResponse);
+}
+
+message BacktestRequest {
+  string strategy_name = 1;
+  string strategy_dsl_code = 2; // The strategy logic in OCaml DSL text format
+  string symbol = 3;           // The trading pair to backtest on
+  google.protobuf.Timestamp start_time = 4; // Historical data start time
+  google.protobuf.Timestamp end_time = 5;   // Historical data end time
+  double initial_capital = 6;  // Starting capital for the backtest
+  // Add other parameters like trading fees, slippage settings, etc.
+}
+
+message BacktestResponse {
+  bool success = 1;          // True if backtest ran successfully
+  string error_message = 2;  // Details if success is false
+  double total_profit = 3;   // Net profit/loss
+  double max_drawdown = 4;   // Maximum drawdown
+  double sharpe_ratio = 5;   // Sharpe ratio (or other risk-adjusted metric)
+  int32 total_trades = 6;    // Number of trades executed
+  // Add other relevant metrics (e.g., win rate, profit factor, list of trades)
+  repeated BacktestTrade trade_history = 7; // Optional: list of trades
+
+}
+
+message BacktestTrade {
+  string symbol = 1;
+  market_data.OrderSide side = 2; // Reuse enum from market_data
+  string entry_price = 3; // Price trade was entered (string for precision)
+  string exit_price = 4;  // Price trade was exited (string for precision)
+  string quantity = 5;    // Quantity traded (string for precision)
+  google.protobuf.Timestamp entry_time = 6;
+  google.protobuf.Timestamp exit_time = 7;
+  string profit_loss = 8; // Profit/Loss for this trade (string for precision)
+}

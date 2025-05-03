@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package strategy_engine;
+
+// Service for managing strategies on the Strategy DSL Engine
+service StrategyEngineService {
+  // RPC to trigger the Strategy DSL Engine to reload strategy files
+  rpc ReloadStrategies(ReloadStrategiesRequest) returns (ReloadStrategiesResponse);
+
+  // Optional: RPC to get a list of currently loaded strategies
+  // rpc GetLoadedStrategies(GetLoadedStrategiesRequest) returns (GetLoadedStrategiesResponse);
+}
+
+message ReloadStrategiesRequest {
+  // Criteria for which strategies to reload.
+  // For simplicity, an empty message triggers a full reload of configured active_strategies.
+}
+
+message ReloadStrategiesResponse {
+  bool success = 1;          // True if reload was initiated successfully
+  string message = 2;        // Status message (e.g., "Reload initiated", "Error reading config")
+  // Add details about loaded strategies if needed
+  // repeated string loaded_strategy_names = 3;
+}
+
+// message GetLoadedStrategiesRequest {
+//   // Criteria for which strategies to list (e.g., by name, symbol)
+// }
+
+// message GetLoadedStrategiesResponse {
+//   bool success = 1;
+//   string message = 2;
+//   repeated StrategyInfo strategies = 3;
+// }
+
+// message StrategyInfo {
+//   string name = 1;
+//   string symbol = 2; // If strategies are bound to symbols
+//   bool is_active = 3;
+//   // Add other relevant info
+// }

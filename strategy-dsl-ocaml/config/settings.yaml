@@ -1,8 +1,8 @@
 # Configuration for the Strategy DSL Engine
 
-# gRPC configuration for this service (serving health checks)
-grpc: # Using grpc section name for consistency, even if only health check is gRPC/HTTP
-  listen_address: "0.0.0.0:50053" # Address where this service listens for health checks (e.g., HTTP)
+# gRPC configuration for this service (serving the StrategyEngineService RPCs)
+grpc:
+  listen_address: "0.0.0.0:50053" # Address where this service listens for ReloadStrategies RPC etc.
 
 # Addresses for upstream gRPC services
 upstream_grpc:
@@ -13,12 +13,14 @@ upstream_grpc:
 # Configuration for strategy execution
 strategy_engine:
   # Path to the directory containing strategy files (*.strat)
-  strategies_path: "examples"
-  # List of strategy files to load and run (relative to strategies_path)
+  # This is where the strategy-gen-lisp component will place generated strategies
+  strategies_path: "examples" # Or specify a dedicated directory like "generated_strategies"
+  # List of strategy files to load and run (relative to strategies_path).
+  # When ReloadStrategies RPC is called, this list is re-read.
   active_strategies:
     - simple_ma_crossover.strat
     - prediction_threshold.strat
-    # - other_strategy.strat
+    # Add names of generated strategies here or manage the file list dynamically
 
 # Data management configuration
 data:
@@ -26,9 +28,9 @@ data:
   # Set this to at least 2 if using the '.prev' syntax in strategies.
   max_history_size: 10 # Store enough history for '.prev' and potential future extensions
 
-# Health check configuration
+# Health check and Prometheus metrics configuration
 health_check:
-  listen_address: "0.0.0.0:8082" # Address for the HTTP health check server
+  listen_address: "0.0.0.0:8082" # Address for the HTTP health check (/healthz) and Prometheus (/metrics) server
 
 # Optional: Logging configuration
 logging:

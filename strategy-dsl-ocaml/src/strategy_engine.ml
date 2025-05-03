@@ -14,6 +14,7 @@ open Logs (* For logging *)
 open Result.Infix (* For Result binds *)
 open Batteries.Hashtbl (* For Hashtbl functions *)
 open Prometheus (* For metrics *)
+open Strategy_engine_pb (* Added *)
 
 (** Internal structure for a loaded and compiled strategy *)
 type loaded_strategy = {
@@ -68,7 +69,7 @@ let process_strategy_file data_manager filepath =
   lexbuf.Lexing.lex_curr_p <- { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filepath }; (* Set filename for error messages *)
   let strategy_ast =
     try
-      Strategy_parser.strategy Strategy_lexer.token lexbuf (* Parse the file *)
+      Result.Ok (Strategy_parser.strategy Strategy_lexer.token lexbuf) (* Parse the file *)
     with
     | Strategy_parser.Error msg ->
         let pos = Lexing.lexeme_start_p lexbuf in
@@ -86,7 +87,7 @@ let process_strategy_file data_manager filepath =
   in
   close_in channel;
 
-  strategy_ast |> Result.map_error (fun msg -> `ParseError msg) (* Ensure parse errors are tagged *)
+  strategy_ast
   |> Result.bind_lwt (fun ast ->
       info (fun m -> m "Strategy '%s' parsed successfully" ast.name);
       (* Type check the strategy *)
@@ -172,17 +173,11 @@ let rec execution_loop engine =
     (* Iterate through symbols with new data *)
     let* () = Lwt_list.iter_s (fun symbol ->
       (* Iterate through loaded strategies and execute those relevant to the symbol *)
-      (* Note: We iterate over a copy of the keys to avoid issues if the Hashtbl is modified *)
-      let strategy_names_to_run = Lwt_main.run (Lwt_mutex.with_lock engine.engine_mutex (fun () ->
-         Hashtbl.keys engine.loaded_strategies |> List.of_seq |> Lwt.return
-      )) (* Use Lwt_main.run for a quick sync access, or refactor *)
-      (* Correction: Accessing mutable shared state (Hashtbl) needs Lwt_mutex.
-                     Let's get the list of strategies while holding the mutex. *)
+      (* Get the list of strategies while holding the mutex *)
        let strategies_to_run = Lwt_main.run (Lwt_mutex.with_lock engine.engine_mutex (fun () ->
           Hashtbl.to_list engine.loaded_strategies |> Lwt.return (* Get list of (name, strategy) *)
        ))
       in
-
 
       let* () = Lwt_list.iter_s (fun (strat_name, loaded_strat) ->
         (* Check if the strategy is relevant to this symbol.
@@ -195,7 +190,7 @@ let rec execution_loop engine =
 
         match result with
         | Result.Ok (updated_state, actions) ->
-            debug (fun m -> m "Strategy '%s' execution succeeded. Generated %d actions. State updated." loaded_strat.name (List.length actions));
+            debug (fun m -> m "Strategy '%s' execution succeeded. Generated %d actions." loaded_strat.name (List.length actions));
             (* Update the strategy's state *)
             loaded_strat.state <- updated_state;
             (* Actions are executed *within* execute_compiled_strategy by calling grpc_clients *)
@@ -231,3 +226,18 @@ let stop_execution_loop engine =
    engine.stop_requested <- true; (* Set the stop flag *)
    Lwt_condition.signal engine.data_manager.new_data_condition; (* Signal the condition variable to unblock wait *)
    Lwt.return_unit (* Return immediately *)
+
+
+(* Implementation of the ReloadStrategies RPC *)
+let handle_reload_strategies engine _req =
+  info (fun m -> m "Received ReloadStrategies RPC. Initiating strategy reload.");
+  Lwt.catch (fun () ->
+    load_strategies engine >>= fun () ->
+    info (fun m -> m "Strategy reload completed via RPC.");
+    Lwt.return (Result.Ok (Strategy_engine_pb.ReloadStrategiesResponse.create ~success:true ~message:"Reload initiated and completed." ()))
+  ) (fun e ->
+    let msg = Printf.sprintf "Error during strategy reload RPC: %s" (Printexc.to_string e) in
+    error (fun m -> m "%s" msg);
+    Lwt.return (Result.Ok (Strategy_engine_pb.ReloadStrategiesResponse.create ~success:false ~message:(Printf.sprintf "Reload failed: %s" msg) ()))
+    (* Return OK status with success=false and error message in the response payload for RPC errors *)
+  )

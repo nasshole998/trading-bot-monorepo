@@ -6,7 +6,7 @@ open Lwt_condition (* For condition variables *)
 open Timestamps_proto.Google.Protobuf (* For Timestamp *)
 open Indicator_data_pb (* For IndicatorValue *)
 open Ml_prediction_pb (* For PredictionValue *)
-open Market_data_pb (* For Trade, Quote, OrderBookUpdate *)
+open Market_data_pb (* For Trade, Quote, OrderBookUpdate, OrderUpdate, OrderStatus *)
 open Batteries.Deque (* Use Deque for history *)
 
 (** Type for a market data item *)
@@ -30,8 +30,21 @@ type prediction_data_item = {
   prediction_type: string;
 }
 
+(** Type for an order update item *)
+type order_update_item = {
+  timestamp: Timestamp.t;
+  client_order_id: string;
+  exchange_order_id: string;
+  symbol: string;
+  status: OrderStatus.t;
+  message: string;
+  quantity: string;
+  cumulative_filled_quantity: string;
+  latest_fill_price: string;
+}
 
-(** The main data manager type. Stores recent data streams per symbol. *)
+
+(** The main data manager type. Stores recent data streams per symbol and order updates. *)
 type t
 
 (** Create a new data manager instance. *)
@@ -45,6 +58,9 @@ val add_indicator_value : t -> Indicator_data_pb.IndicatorValue.t -> unit Lwt.t
 
 (** Add a prediction value to the manager. Returns unit Lwt.t. *)
 val add_prediction_value : t -> Ml_prediction_pb.PredictionValue.t -> unit Lwt.t
+
+(** Add an order update to the manager. Returns unit Lwt.t. *)
+val add_order_update : t -> market_data_pb.OrderUpdate.t -> unit Lwt.t
 
 (** Get the latest market data item for a symbol. Returns (timestamp, value, source) option Lwt.t. *)
 val get_latest_market_data : t -> string -> (Timestamp.t * string * string) option Lwt.t
@@ -61,6 +77,8 @@ val get_latest_prediction : t -> string -> string -> (Timestamp.t * string * str
 (** Get the previous prediction value for a specific type on a symbol (1 period ago). Returns (timestamp, value) option Lwt.t. *)
 val get_previous_prediction : t -> string -> string -> (Timestamp.t * string * string) option Lwt.t
 
+(** Get the latest update for a specific client order ID. Returns order_update_item option Lwt.t. *)
+val get_latest_order_update : t -> string -> order_update_item option Lwt.t
 
 (** Get a list of symbols currently tracked by the data manager. *)
 val get_tracked_symbols : t -> string list Lwt.t
@@ -73,3 +91,7 @@ val get_known_prediction_names : t -> string list Lwt.t
 
 (** Wait for new data notification and return symbols that have new data. *)
 val wait_for_new_data : t -> string list Lwt.t
+
+(* Note: Order updates do NOT trigger the main execution loop; strategies
+   query order status when needed. A separate order management module
+   might be needed for strategies to react to fills/cancels directly. *)

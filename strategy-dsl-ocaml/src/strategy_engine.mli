@@ -6,6 +6,7 @@ open Strategy_data (* Need DataManager *)
 open Strategy_grpc (* Need gRPC Clients *)
 open Strategy_config (* Need Config types *)
 open Strategy_ast (* Need AST types *)
+open Strategy_engine_grpc (* Need generated gRPC service *)
 
 (** Type for a loaded and compiled strategy *)
 type loaded_strategy = {
@@ -32,3 +33,6 @@ val get_loaded_strategy_names : t -> string list Lwt.t
 
 (** Stop the execution loop gracefully. *)
 val stop_execution_loop : t -> unit Lwt.t
+
+(* Implementation of the ReloadStrategies RPC *)
+val handle_reload_strategies : t -> Strategy_engine_pb.ReloadStrategiesRequest.t -> (Strategy_engine_pb.ReloadStrategiesResponse.t, [> Grpc_lwt.status * string | `Other of exn]) result Lwt.t

@@ -19,6 +19,21 @@ enum OrderType {
   // Add other types like STOP, STOP_LIMIT, etc. as needed
 }
 
+// Enum for order status
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_NEW = 1; // Order created but not yet acknowledged by exchange
+  ORDER_STATUS_ACKNOWLEDGED = 2; // Order acknowledged by exchange
+  ORDER_STATUS_PARTIALLY_FILLED = 3; // Order partially filled
+  ORDER_STATUS_FILLED = 4; // Order fully filled
+  ORDER_STATUS_CANCELED = 5; // Order canceled
+  ORDER_STATUS_REJECTED = 6; // Order rejected by exchange or system
+  ORDER_STATUS_EXPIRED = 7; // Order expired
+  ORDER_STATUS_PENDING_CANCEL = 8; // Order cancellation requested
+  ORDER_STATUS_PENDING_REPLACE = 9; // Order replacement requested
+}
+
+
 // Market data events stream from ingestion service
 service MarketDataService {
   // Client-streaming RPC to receive real-time market data events from the ingestion service.
@@ -29,9 +44,9 @@ service MarketDataService {
   // This RPC is called by the Strategy Engine (client) on the Data Ingestion Service (server).
   rpc ExecuteOrder(OrderRequest) returns (OrderResponse);
 
-  // Optional: Server-streaming RPC for order status updates from the ingestion service.
+  // Server-streaming RPC for order status updates from the ingestion service.
   // Strategy Engine (client) subscribes here to get updates on its placed orders.
-  // rpc SubscribeToOrderUpdates(OrderUpdateRequest) returns (stream OrderUpdate);
+  rpc SubscribeToOrderUpdates(OrderUpdateRequest) returns (stream OrderUpdate);
 }
 
 message MarketDataEvent {
@@ -103,25 +118,26 @@ message OrderRequest {
 message OrderResponse {
   string client_order_id = 1;   // The client_order_id from the request
   string exchange_order_id = 2; // The order ID assigned by the exchange
-  string status = 3;            // Current status of the order (e.g., "ACKNOWLEDGED", "FILLED", "REJECTED")
+  OrderStatus status = 3;       // Current status of the order
   string message = 4;           // Optional message (e.g., rejection reason)
   google.protobuf.Timestamp timestamp = 5; // Timestamp of the response
   // Add filled quantity, average fill price, etc.
 }
 
-// message OrderUpdateRequest {
-//   // Define criteria for updates if not subscribing to all orders
-//   repeated string client_order_ids = 1;
-//   repeated string exchange_order_ids = 2;
-//   repeated string symbols = 3;
-// }
+message OrderUpdateRequest {
+  // Define criteria for updates if not subscribing to all orders
+  // Leaving empty subscribes to all orders originating from this strategy engine instance
+}
 
-// message OrderUpdate {
-//   string client_order_id = 1;
-//   string exchange_order_id = 2;
-//   string symbol = 3;
-//   string status = 4; // e.g., "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "REJECTED"
-//   string message = 5;
-//   google.protobuf.Timestamp timestamp = 6;
-//   // Add quantity, cumulative_filled_quantity, latest_fill_price, etc.
-// }
+message OrderUpdate {
+  string client_order_id = 1;
+  string exchange_order_id = 2;
+  string symbol = 3;
+  OrderStatus status = 4;
+  string message = 5;
+  google.protobuf.Timestamp timestamp = 6;
+  string quantity = 7; // Total quantity of the order
+  string cumulative_filled_quantity = 8; // Total quantity filled so far
+  string latest_fill_price = 9; // Price of the latest fill (if status is PARTIALLY_FILLED or FILLED)
+  // Add other relevant fields (e.g., fees, trade_id for fill)
+}

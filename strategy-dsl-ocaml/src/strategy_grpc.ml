@@ -9,7 +9,7 @@ open Indicator_data_pb (* For IndicatorValue *)
 open Indicator_data_grpc (* For IndicatorService client stub *)
 open Ml_prediction_pb (* For PredictionValue *)
 open Ml_prediction_grpc (* For PredictionService client stub *)
-open Market_data_pb (* For OrderRequest, OrderResponse, MarketDataService client stub *)
+open Market_data_pb (* For OrderRequest, OrderResponse, OrderUpdate, MarketDataService client stub *)
 open Market_data_grpc (* For MarketDataService client stub *)
 open Logs (* For logging *)
 open Result (* For Result type *)
@@ -23,25 +23,41 @@ type t = {
   order_execution_chan: Grpc_lwt.Client.channel;
 }
 
-(* Helper to create a gRPC channel *)
-let create_channel address =
-  info (fun m -> m "Creating gRPC channel to %s" address);
-  let uri = Uri.of_string ("grpc://" ^ address) in (* Assuming insecure for now *)
-  Grpc_lwt.Client.open_uri uri
+(* Helper to create a gRPC channel with retry logic *)
+let rec create_channel_with_retry address attempt =
+  let delay = min (5.0 *. (float_of_int (1 lsl attempt))) 60.0 in (* Exponential backoff up to 60s *)
+  info (fun m -> m "Attempt %d: Creating gRPC channel to %s (retrying in %.1f s)" attempt address delay);
+  Lwt.catch (fun () ->
+    let uri = Uri.of_string ("grpc://" ^ address) in (* Assuming insecure for now *)
+    Grpc_lwt.Client.open_uri uri >>= fun channel ->
+    info (fun m -> m "Successfully created gRPC channel to %s" address);
+    Lwt.return channel
+  ) (fun e ->
+    error (fun m -> m "Failed to create gRPC channel to %s: %s. Retrying..." address (Printexc.to_string e));
+    let* () = Lwt_unix.sleep delay in
+    create_channel_with_retry address (attempt + 1)
+  )
 
-(** Create a new gRPC client environment (channels only). *)
+
+(** Create a new gRPC client environment (channels only) with retry. *)
 let create ~indicator_addr ~prediction_addr ~ingestion_addr =
-  let indicator_chan = create_channel indicator_addr in
-  let prediction_chan = create_channel prediction_addr in
-  let ingestion_chan = create_channel ingestion_addr in
-  {
+  let indicator_chan = create_channel_with_retry indicator_addr 1 in
+  let prediction_chan = create_channel_with_retry prediction_addr 1 in
+  let ingestion_chan = create_channel_with_retry ingestion_addr 1 in
+  (* We need to wait for channels to be created before returning the struct *)
+  let* indicator_chan = indicator_chan in
+  let* prediction_chan = prediction_chan in
+  let* ingestion_chan = ingestion_chan in
+  Lwt.return {
     indicator_chan;
     prediction_chan;
-    order_execution_chan;
+    order_execution_chan = ingestion_chan;
   }
 
+
 (* Helper to handle a streaming RPC and feed data into the data manager *)
-let rec handle_streaming_rpc ~channel ~rpc_method ~subscribe_request ~data_mgr ~add_data_fn ~stream_name =
+let rec handle_streaming_rpc ~channel_lwt ~rpc_method ~subscribe_request ~data_mgr ~add_data_fn ~stream_name =
+  let* channel = channel_lwt in (* Wait for channel to be available *)
   info (fun m -> m "Starting gRPC client stream '%s'" stream_name);
   Lwt.catch (fun () ->
     (* Use Grpc_lwt.Client.call_server_streaming for non-blocking stream *)
@@ -55,10 +71,10 @@ let rec handle_streaming_rpc ~channel ~rpc_method ~subscribe_request ~data_mgr ~
         (* Status can be checked here if needed, but usually stream finishes first *)
         info (fun m -> m "gRPC stream '%s' established. Processing messages..." stream_name);
         (* Iterate over the stream and process messages *)
-        Grpc_lwt.Client.Stream.iter (fun data ->
-          add_data_fn data_mgr data >>= fun () ->
+        let* () = Grpc_lwt.Client.Stream.iter (fun data ->
+          let* () = add_data_fn data_mgr data in
           Lwt.return Continue (* Continue processing the stream *)
-        ) stream >>= fun () -> (* Wait for stream iteration to complete *)
+        ) stream in (* Wait for stream iteration to complete *)
         (* Stream finished iterating (either closed by server or error) *)
         info (fun m -> m "gRPC client stream '%s' iteration finished." stream_name);
         (* The stream is done, check the final status *)
@@ -67,26 +83,26 @@ let rec handle_streaming_rpc ~channel ~rpc_method ~subscribe_request ~data_mgr ~
         (* If the stream finishes, attempt to reconnect after a delay *)
         Lwt_unix.sleep 5.0 >>= fun () -> (* Wait for 5 seconds before retrying *)
         warning (fun m -> m "Attempting to reconnect '%s' stream..." stream_name);
-        handle_streaming_rpc ~channel ~rpc_method ~subscribe_request ~data_mgr ~add_data_fn ~stream_name (* Retry connection *)
+        handle_streaming_rpc ~channel_lwt:(Lwt.return channel) ~rpc_method ~subscribe_request ~data_mgr ~add_data_fn ~stream_name (* Retry connection *)
 
     | Error (`Grpc_status (status, msg)) ->
         error (fun m -> m "gRPC client stream '%s' failed to establish with status %s: %s" stream_name (Grpc_status.show status) msg);
         (* If connection fails, attempt to reconnect after a delay *)
         Lwt_unix.sleep 5.0 >>= fun () -> (* Wait before retrying *)
         warning (fun m -> m "Attempting to reconnect '%s' stream after error..." stream_name);
-        handle_streaming_rpc ~channel ~rpc_method ~subscribe_request ~data_mgr ~add_data_fn ~stream_name (* Retry connection *)
+        handle_streaming_rpc ~channel_lwt:(Lwt.return channel) ~rpc_method ~subscribe_request ~data_mgr ~add_data_fn ~stream_name (* Retry connection *)
     | Error (`Other err) ->
         error (fun m -> m "gRPC client stream '%s' failed to establish with unexpected error: %s" stream_name (Printexc.to_string err));
         (* If connection fails, attempt to reconnect after a delay *)
         Lwt_unix.sleep 5.0 >>= fun () -> (* Wait before retrying *)
         warning (fun m -> m "Attempting to reconnect '%s' stream after exception..." stream_name);
-        handle_streaming_rpc ~channel ~rpc_method ~subscribe_request ~data_mgr ~add_data_fn ~stream_name (* Retry connection *)
+        handle_streaming_rpc ~channel_lwt:(Lwt.return channel) ~rpc_method ~subscribe_request ~data_mgr ~add_data_fn ~stream_name (* Retry connection *)
   ) (fun e ->
     (* Catch exceptions during the Lwt flow *)
     error (fun m -> m "Exception in gRPC client stream '%s' loop: %s" stream_name (Printexc.to_string e));
     Lwt_unix.sleep 5.0 >>= fun () -> (* Wait before retrying *)
     warning (fun m -> m "Attempting to reconnect '%s' stream after exception..." stream_name);
-    handle_streaming_rpc ~channel ~rpc_method ~subscribe_request ~data_mgr ~add_data_fn ~stream_name (* Retry connection *)
+    handle_streaming_rpc ~channel_lwt:(Lwt.return channel) ~rpc_method ~subscribe_request ~data_mgr ~add_data_fn ~stream_name (* Retry connection *)
   )
 
 
@@ -96,7 +112,7 @@ let start_indicator_subscription grpc_client_env data_mgr =
   let rpc_method = "/indicator_data.IndicatorService/SubscribeToIndicators" in (* Full RPC method name *)
   let request = IndicatorSubscriptionRequest.create () in (* Empty request subscribes to all by default *)
   handle_streaming_rpc
-    ~channel:grpc_client_env.indicator_chan
+    ~channel_lwt:(Lwt.return grpc_client_env.indicator_chan) (* Pass channel as Lwt.t *)
     ~rpc_method:rpc_method
     ~subscribe_request:request
     ~data_mgr:data_mgr
@@ -110,12 +126,25 @@ let start_prediction_subscription grpc_client_env data_mgr =
    let rpc_method = "/ml_prediction.PredictionService/SubscribeToPredictions" in (* Full RPC method name *)
    let request = PredictionSubscriptionRequest.create () in (* Empty request subscribes to all by default *)
    handle_streaming_rpc
-     ~channel:grpc_client_env.prediction_chan
+     ~channel_lwt:(Lwt.return grpc_client_env.prediction_chan) (* Pass channel as Lwt.t *)
      ~rpc_method:rpc_method
      ~subscribe_request:request
      ~data_mgr:data_mgr
      ~add_data_fn:Strategy_data.add_prediction_value
      ~stream_name:"PredictionStream"
+
+(** Start the client task to subscribe to order status updates. *)
+let start_order_update_subscription grpc_client_env data_mgr =
+  let open MarketDataService in
+  let rpc_method = "/market_data.MarketDataService/SubscribeToOrderUpdates" in (* Full RPC method name *)
+  let request = OrderUpdateRequest.create () in (* Empty request subscribes to all by default *)
+  handle_streaming_rpc
+    ~channel_lwt:(Lwt.return grpc_client_env.order_execution_chan) (* Pass channel as Lwt.t *)
+    ~rpc_method:rpc_method
+    ~subscribe_request:request
+    ~data_mgr:data_mgr
+    ~add_data_fn:Strategy_data.add_order_update
+    ~stream_name:"OrderUpdateStream"
 
 
 (* Counter for generating unique client order IDs *)
@@ -162,10 +191,11 @@ let send_order grpc_client_env exchange symbol side otype quantity price =
         (* Wait for the final status *)
         let final_status = Lwt_main.run status in (* Blocking call to get final status *)
         info (fun m -> m "Order response for %s (Exchange ID: %s): Status=%s, Msg=%s (gRPC Status: %s)"
-              client_order_id response.OrderResponse.exchange_order_id response.OrderResponse.status response.OrderResponse.message (Grpc_status.show final_status));
-        (* Note: The DSL interpreter currently does NOT receive this response.
-           A real system needs an order state manager and potentially a subscription
-           to Order Updates from the ingestion service. *)
+              client_order_id response.OrderResponse.exchange_order_id (Market_data_pb.OrderStatus.show response.OrderResponse.status) response.OrderResponse.message (Grpc_status.show final_status));
+        (* The response payload provides the *initial* status (e.g., ACKNOWLEDGED, REJECTED).
+           Subsequent status *updates* (e.g., FILLED) come via the SubscribeToOrderUpdates stream.
+           The DSL interpreter currently does NOT receive this response directly;
+           it could potentially query the DataManager for the latest status for a given ID if needed. *)
         Lwt.return (Ok ()) (* Indicate the RPC call itself was successful *)
     | Error (`Grpc_status (status, msg)) ->
         error (fun m -> m "gRPC status error sending order %s: Status=%s, Msg=%s" client_order_id (Grpc_status.show status) msg);

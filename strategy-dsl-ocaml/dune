@@ -1,5 +1,50 @@
 (lang dune 3.11)
 
+(using ctypes 0.3)
+(using ppx_lwt 3.0)
+
+(name strategy_dsl)
+
+(repositories
+ (default
+  (source (copy ../../_opam/repo))))
+
+(package
+ (name strategy_dsl)
+ (synopsis "Trading Strategy DSL Engine")
+ (description "Parses, compiles, and executes trading strategies based on indicators and predictions.")
+ (depends
+  (ocaml
+   (>= 4.14.0))
+  (dune >= 3.0)
+  (menhir)
+  (ocamlllex)
+  (ocaml-protoc >= 0.1)
+  (ocaml-protoc-plugin >= 0.1)
+  (ocaml-grpc >= 0.1)
+  (ocaml-grpc-lwt >= 0.1)
+  (lwt >= 5.0)
+  (lwt_mutex)
+  (lwt_condition)
+  (cohttp-lwt-unix >= 5.0)
+  (logs)
+  (mtime)
+  (ppx_sexp_conv)
+  (sexplib)
+  (yaml-ez >= 0.1)
+  (uri)
+  (batteries)
+  (yojson)
+  (ptime)
+  (result)
+  (csexp)
+  (ppx_lwt)
+  (prometheus)
+  (prometheus-app)
+ ))
+
+(build.prob_rules)
+
 ; Rule to generate Protobuf/gRPC OCaml code
 (rule
  (targets generated/market_data_pb.ml
@@ -13,7 +58,16 @@
           generated/ml_prediction_pb.ml
           generated/ml_prediction_pb.mli
           generated/ml_prediction_grpc.ml
-          generated/ml_prediction_grpc.mli)
+          generated/ml_prediction_grpc.mli
+          generated/strategy_engine_pb.ml     ; Added
+          generated/strategy_engine_pb.mli   ; Added
+          generated/strategy_engine_grpc.ml  ; Added
+          generated/strategy_engine_grpc.mli ; Added
+          generated/backtester_pb.ml         ; Added (Needed if OCaml uses backtester proto)
+          generated/backtester_pb.mli        ; Added
+          generated/backtester_grpc.ml       ; Added
+          generated/backtester_grpc.mli      ; Added
+         )
  (deps
   (source_tree ../../proto/))
  (action
@@ -25,7 +79,10 @@
        --ocaml-grpc_out=generated/
        ../../proto/market_data.proto
        ../../proto/indicator_data.proto
-       ../../proto/ml_prediction.proto)))
+       ../../proto/ml_prediction.proto
+       ../../proto/strategy_engine.proto  ; Added
+       ../../proto/backtester.proto       ; Added
+      )))
 
 ; Rule to generate lexer and parser from .mll and .mly files
 (rule
@@ -58,8 +115,8 @@
   batteries
   yojson
   ppx_lwt
-  prometheus ; Added
-  prometheus-app ; Added
+  prometheus
+  prometheus-app
  )
  (modules
   ; Generated modules from protobuf
@@ -69,6 +126,10 @@
   generated.indicator_data_grpc
   generated.ml_prediction_pb
   generated.ml_prediction_grpc
+  generated.strategy_engine_pb      ; Added
+  generated.strategy_engine_grpc    ; Added
+  generated.backtester_pb           ; Added
+  generated.backtester_grpc         ; Added
 
   ; DSL modules
   strategy_ast
@@ -86,12 +147,15 @@
   main
  )
  (flags (:standard -warn-error +a -open Lwt))
- (preprocess (pps ppx_lwt)) ; Enable ppx_lwt
+ (preprocess (pps ppx_lwt))
 
  ; Link time dependency on generated modules
  (buildable_libraries generated.market_data_pb generated.market_data_grpc
                       generated.indicator_data_pb generated.indicator_data_grpc
-                      generated.ml_prediction_pb generated.ml_prediction_grpc))
+                      generated.ml_prediction_pb generated.ml_prediction_grpc
+                      generated.strategy_engine_pb generated.strategy_engine_grpc ; Added
+                      generated.backtester_pb generated.backtester_grpc           ; Added
+                     ))
 
 ; Alias for running tests (optional)
 ; (alias

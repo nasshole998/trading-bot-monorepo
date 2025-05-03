@@ -7,7 +7,7 @@ open Lwt_condition (* For condition variables *)
 open Timestamps_proto.Google.Protobuf (* For Timestamp *)
 open Indicator_data_pb (* For IndicatorValue *)
 open Ml_prediction_pb (* For PredictionValue *)
-open Market_data_pb (* For Trade, Quote, OrderBookUpdate *)
+open Market_data_pb (* For Trade, Quote, OrderBookUpdate, OrderUpdate, OrderStatus *)
 open Logs (* For logging *)
 open Batteries.Deque (* Use Deque for history *)
 open Batteries.List (* For Batteries.List.last *)
@@ -33,6 +33,8 @@ type t = {
   mutable known_indicators: string list; (* List of all indicator names seen *)
   mutable known_predictions: string list; (* List of all prediction types seen *)
   known_names_mutex: Lwt_mutex.t; (* Mutex for known names lists *)
+  order_updates_map: (string, order_update_item) Hashtbl.t; (* client_order_id -> latest order update *)
+  order_updates_mutex: Lwt_mutex.t; (* Mutex for order_updates_map *)
 }
 
 (** Create a new data manager instance. *)
@@ -47,6 +49,8 @@ let create ~max_history_size =
     known_indicators = [];
     known_predictions = [];
     known_names_mutex = Lwt_mutex.create ();
+    order_updates_map = Hashtbl.create 1000; (* Initial size for order updates *)
+    order_updates_mutex = Lwt_mutex.create ();
   }
 
 (* Helper to get or create symbol_data *)
@@ -111,8 +115,8 @@ let add_market_data mgr event =
           let bid_price_opt = float_of_string_opt event.quote.bid_price in
           let ask_price_opt = float_of_string_opt event.quote.ask_price in
           match bid_price_opt, ask_price_opt with
-          | Some bid, Some ask when bid > 0.0 && ask > 0.0 -> (* Ensure positive prices *)
-              let midpoint = (bid +. ask) /. 2.0 in
+          | Some bid, Some ask when bid >= 0.0 && ask >= 0.0 -> (* Ensure non-negative prices *)
+              let midpoint = if bid = 0.0 && ask = 0.0 then 0.0 else (bid +. ask) /. 2.0 in
               { timestamp = event.quote.timestamp; value = string_of_float midpoint; source = "quote" }
           | _ ->
               warning (fun m -> m "Could not parse or invalid quote prices for %s" symbol);
@@ -123,8 +127,8 @@ let add_market_data mgr event =
             let best_bid_opt = float_of_string_opt (List.hd event.order_book_update.bids).price in
             let best_ask_opt = float_of_string_opt (List.hd event.order_book_update.asks).price in
             match best_bid_opt, best_ask_opt with
-            | Some bid, Some ask when bid > 0.0 && ask > 0.0 -> (* Ensure positive prices *)
-                let midpoint = (bid +. ask) /. 2.0 in
+            | Some bid, Some ask when bid >= 0.0 && ask >= 0.0 -> (* Ensure non-negative prices *)
+                let midpoint = if bid = 0.0 && ask = 0.0 then 0.0 else (bid +. ask) /. 2.0 in
                 { timestamp = event.order_book_update.timestamp; value = string_of_float midpoint; source = "order_book_update" }
             | _ ->
                 warning (fun m -> m "Could not parse or invalid best bid/ask prices for %s OB update" symbol);
@@ -212,6 +216,42 @@ let add_prediction_value mgr value =
        )
      )
 
+(* Add an order update to the manager. *)
+let add_order_update mgr update =
+   let open Market_data_pb in
+   let client_order_id = update.OrderUpdate.client_order_id in
+   let exchange_order_id = update.exchange_order_id in
+   let symbol = update.symbol in
+   let status = update.status in
+   let message = update.message in
+   let quantity = update.quantity in
+   let cumulative_filled_quantity = update.cumulative_filled_quantity in
+   let latest_fill_price = update.latest_fill_price in
+   let timestamp = update.timestamp in
+
+   if client_order_id = "" || symbol = "" || not (Timestamp.is_valid timestamp) then (
+       warning (fun m -> m "Received invalid order update (empty client_order_id/symbol or invalid timestamp)");
+       Lwt.return_unit
+   ) else (
+       Lwt_mutex.with_lock mgr.order_updates_mutex (fun () ->
+           let item = {
+               timestamp;
+               client_order_id;
+               exchange_order_id;
+               symbol;
+               status;
+               message;
+               quantity;
+               cumulative_filled_filled_quantity;
+               latest_fill_price;
+           } in
+           Hashtbl.replace mgr.order_updates_map client_order_id item; (* Replace with latest update for this ID *)
+           info (fun m -> m "Stored order update for client_order_id %s (Status: %s)" client_order_id (OrderStatus.show status));
+           (* Order updates do NOT trigger the main execution loop via notify_new_data *)
+           Lwt.return_unit
+       )
+   )
+
 
 (* Helper to get nth most recent item from a deque *)
 let get_nth_recent deque n =
@@ -288,6 +328,11 @@ let get_previous_prediction mgr symbol ptype =
        )
    | None -> Lwt.return None
 
+(* Get the latest update for a specific client order ID. Returns order_update_item option Lwt.t. *)
+let get_latest_order_update mgr client_order_id =
+  Lwt_mutex.with_lock mgr.order_updates_mutex (fun () ->
+    Lwt.return (Hashtbl.find_opt mgr.order_updates_map client_order_id)
+  )
 
 (* Get a list of symbols currently tracked by the data manager. *)
 let get_tracked_symbols mgr =
