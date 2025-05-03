@@ -12,8 +12,8 @@ open Strategy_config (* Need Config types *)
 open Lwt.Infix (* For Lwt binds *)
 open Logs (* For logging *)
 open Result.Infix (* For Result binds *)
-open Batteries.Hashtbl (* For Hashtbl.copy *)
-
+open Batteries.Hashtbl (* For Hashtbl functions *)
+open Prometheus (* For metrics *)
 
 (** Internal structure for a loaded and compiled strategy *)
 type loaded_strategy = {
@@ -28,12 +28,23 @@ type t = {
   data_manager: Strategy_data.t;
   grpc_clients: Strategy_grpc.t;
   config: Strategy_config.t;
-  mutable loaded_strategies: loaded_strategy list; (* List of strategies *)
+  loaded_strategies: (string, loaded_strategy) Hashtbl.t; (* Hashtbl for strategies by name *)
   mutable stop_requested: bool; (* Flag for graceful shutdown *)
   stop_promise: unit Lwt.t; (* Promise that resolves when stop is requested *)
   resolve_stop: unit Lwt.u; (* Resolver for stop_promise *)
-  engine_mutex: Lwt_mutex.t; (* Mutex for engine state if needed, e.g. loaded_strategies *)
+  engine_mutex: Lwt_mutex.t; (* Mutex for engine state if needed *)
 }
+
+(* Prometheus Metrics *)
+let executed_strategies_total =
+  Prometheus.Counter.v
+    ~help:"Total number of strategy execution runs triggered by data updates."
+    "strategy_engine_executed_strategies_total"
+
+let strategy_execution_errors_total =
+  Prometheus.Counter.v
+    ~help:"Total number of errors encountered during strategy execution."
+    "strategy_engine_execution_errors_total"
 
 (** Create a new strategy engine instance. *)
 let create data_manager grpc_clients config =
@@ -42,7 +53,7 @@ let create data_manager grpc_clients config =
     data_manager = data_manager;
     grpc_clients = grpc_clients;
     config = config;
-    loaded_strategies = [];
+    loaded_strategies = Hashtbl.create 10; (* Initial size for strategies map *)
     stop_requested = false;
     stop_promise = stop_promise;
     resolve_stop = resolve_stop;
@@ -59,44 +70,48 @@ let process_strategy_file data_manager filepath =
     try
       Strategy_parser.strategy Strategy_lexer.token lexbuf (* Parse the file *)
     with
-    | Strategy_parser.Error ->
+    | Strategy_parser.Error msg ->
         let pos = Lexing.lexeme_start_p lexbuf in
         let file = pos.Lexing.pos_fname in
         let line = pos.Lexing.pos_lnum in
         let col = pos.Lexing.pos_cnum - pos.Lexing.pos_bol in
-        let msg = Printf.sprintf "Syntax error in %s at line %d, column %d" file line col in
-        error (fun m -> m "%s" msg);
+        let full_msg = Printf.sprintf "Syntax error in %s at line %d, column %d: %s" file line col msg in
+        error (fun m -> m "%s" full_msg);
         close_in channel;
-        raise (Strategy_parser.Error msg) (* Re-raise with context *)
+        Result.Error (`ParseError full_msg)
     | e ->
         error (fun m -> m "Unexpected error during parsing %s: %s" filepath (Printexc.to_string e));
         close_in channel;
-        raise e (* Re-raise unexpected exceptions *)
+        Result.Error (`ParseError (Printf.sprintf "Unexpected parsing error: %s" (Printexc.to_string e)))
   in
   close_in channel;
-  info (fun m -> m "Strategy '%s' parsed successfully" strategy_ast.name);
 
-  (* Type check the strategy *)
-  Lwt.catch (fun () ->
-    Strategy_typecheck.typecheck_strategy data_manager strategy_ast >>= fun type_env ->
-    info (fun m -> m "Strategy '%s' type checked successfully" strategy_ast.name);
+  strategy_ast |> Result.map_error (fun msg -> `ParseError msg) (* Ensure parse errors are tagged *)
+  |> Result.bind_lwt (fun ast ->
+      info (fun m -> m "Strategy '%s' parsed successfully" ast.name);
+      (* Type check the strategy *)
+      Lwt.catch (fun () ->
+         Strategy_typecheck.typecheck_strategy data_manager ast >>= fun type_env ->
+         info (fun m -> m "Strategy '%s' type checked successfully" ast.name);
 
-    (* Create the initial execution environment (state) *)
-    let initial_exec_env = Hashtbl.create (Hashtbl.length type_env) in
-    strategy_ast.initial_state |> List.iter (fun (name, initial_value) ->
-        Hashtbl.add initial_exec_env name initial_value (* Add initial variable values *)
-    );
-    info (fun m -> m "Initial state created for '%s'" strategy_ast.name);
+         (* Create the initial execution environment (state) *)
+         let initial_exec_env = Hashtbl.create (Hashtbl.length type_env) in
+         ast.initial_state |> List.iter (fun (name, initial_value) ->
+             Hashtbl.add initial_exec_env name initial_value (* Add initial variable values *)
+         );
+         info (fun m -> m "Initial state created for '%s'" ast.name);
 
-    (* Compile/Interpret the strategy *)
-    let compiled = Strategy_compiler.compile_strategy strategy_ast in
-    info (fun m -> m "Strategy '%s' compiled successfully" strategy_ast.name);
+         (* Compile/Interpret the strategy *)
+         let compiled = Strategy_compiler.compile_strategy ast in
+         info (fun m -> m "Strategy '%s' compiled successfully" ast.name);
 
-    Lwt.return (Some { name = strategy_ast.name; compiled_logic = compiled; state = initial_exec_env }) (* Return loaded strategy *)
+         Lwt.return (Result.Ok { name = ast.name; compiled_logic = compiled; state = initial_exec_env }) (* Return loaded strategy *)
 
-  ) (fun e ->
-    error (fun m -> m "Skipping strategy file %s due to processing error: %s" filepath (Printexc.to_string e));
-    Lwt.return None (* Return None on any error during type check or compile *)
+      ) (fun e ->
+         let msg = Printf.sprintf "Processing error for '%s': %s" ast.name (Printexc.to_string e) in
+         error (fun m -> m "%s" msg);
+         Lwt.return (Result.Error (`ProcessError msg)) (* Wrap other errors *)
+      )
   )
 
 
@@ -111,6 +126,17 @@ let load_strategies engine =
     let filepath = Filename.concat strategies_path filename in
     if Sys.file_exists filepath then
       process_strategy_file engine.data_manager filepath (* Lwt task for processing *)
+      >>= fun result ->
+      (match result with
+       | Result.Ok loaded_strat -> Lwt.return (Some loaded_strat)
+       | Result.Error (`ParseError msg) ->
+           error (fun m -> m "Failed to load strategy '%s' due to parse error: %s" filename msg);
+           Lwt.return None
+       | Result.Error (`ProcessError msg) ->
+           error (fun m -> m "Failed to load strategy '%s' due to processing error: %s" filename msg);
+           Lwt.return None
+       (* Add other error types here *)
+      )
     else (
       warning (fun m -> m "Strategy file not found: %s" filepath);
       Lwt.return None (* File not found, return None *)
@@ -122,8 +148,10 @@ let load_strategies engine =
   let successfully_loaded = List.filter_map (fun x -> x) results in (* Filter out None *)
 
   Lwt_mutex.with_lock engine.engine_mutex (fun () ->
-     engine.loaded_strategies <- successfully_loaded; (* Update the list of loaded strategies *)
-     info (fun m -> m "Finished loading strategies. %d loaded successfully." (List.length engine.loaded_strategies));
+     (* Clear existing loaded strategies and add the new ones *)
+     Hashtbl.clear engine.loaded_strategies;
+     List.iter (fun s -> Hashtbl.add engine.loaded_strategies s.name s) successfully_loaded;
+     info (fun m -> m "Finished loading strategies. %d loaded successfully." (Hashtbl.length engine.loaded_strategies));
      Lwt.return_unit
   )
 
@@ -135,37 +163,52 @@ let rec execution_loop engine =
     Lwt.return_unit (* Stop if shutdown requested *)
   ) else (
     (* Wait for new data notification *)
-    Strategy_data.wait_for_new_data engine.data_manager >>= fun symbols_with_new_data ->
+    let* symbols_with_new_data = Strategy_data.wait_for_new_data engine.data_manager in
     debug (fun m -> m "Received new data notification for symbols: %s" (String.concat ", " symbols_with_new_data));
 
-    (* Iterate through symbols with new data *)
-    Lwt_list.iter_s (fun symbol ->
-      (* Iterate through loaded strategies and execute those relevant to the symbol *)
-      Lwt_mutex.with_lock engine.engine_mutex (fun () -> (* Lock access to loaded_strategies *)
-        Hashtbl.copy engine.loaded_strategies (* Make a copy to avoid issues if list changes *)
-        |> Hashtbl.to_list (* Convert to list of (name, strategy) *)
-      ) >>= fun strategies_to_run ->
+    (* Increment metric for triggered executions *)
+    Prometheus.Counter.inc executed_strategies_total;
 
-      Lwt_list.iter_s (fun (strat_name, loaded_strat) ->
+    (* Iterate through symbols with new data *)
+    let* () = Lwt_list.iter_s (fun symbol ->
+      (* Iterate through loaded strategies and execute those relevant to the symbol *)
+      (* Note: We iterate over a copy of the keys to avoid issues if the Hashtbl is modified *)
+      let strategy_names_to_run = Lwt_main.run (Lwt_mutex.with_lock engine.engine_mutex (fun () ->
+         Hashtbl.keys engine.loaded_strategies |> List.of_seq |> Lwt.return
+      )) (* Use Lwt_main.run for a quick sync access, or refactor *)
+      (* Correction: Accessing mutable shared state (Hashtbl) needs Lwt_mutex.
+                     Let's get the list of strategies while holding the mutex. *)
+       let strategies_to_run = Lwt_main.run (Lwt_mutex.with_lock engine.engine_mutex (fun () ->
+          Hashtbl.to_list engine.loaded_strategies |> Lwt.return (* Get list of (name, strategy) *)
+       ))
+      in
+
+
+      let* () = Lwt_list.iter_s (fun (strat_name, loaded_strat) ->
         (* Check if the strategy is relevant to this symbol.
            Currently, the DSL doesn't specify symbol relevance explicitly.
            Assuming all strategies are relevant to any symbol for simplicity.
-           A real system would need mapping from strategy to symbol. *)
+           A real system would need mapping from strategy to symbol, e.g., based on indicator/prediction names used. *)
 
-        Lwt.catch (fun () ->
-          debug (fun m -> m "Executing strategy '%s' for symbol '%s'" loaded_strat.name symbol);
-          Strategy_compiler.execute_compiled_strategy loaded_strat.compiled_logic engine.data_manager engine.grpc_clients symbol loaded_strat.state >>= fun (updated_state, actions) ->
-          debug (fun m -> m "Strategy '%s' generated %d actions. State updated." loaded_strat.name (List.length actions));
-          (* Update the strategy's state *)
-          loaded_strat.state <- updated_state;
-          (* Actions are executed *within* execute_compiled_strategy by calling grpc_clients *)
-          Lwt.return_unit (* Move to next strategy *)
-        ) (fun e ->
-          error (fun m -> m "Error executing strategy '%s' for symbol '%s': %s" loaded_strat.name symbol (Printexc.to_string e));
-          Lwt.return_unit (* Continue with next strategy even if one fails *)
-        )
+        debug (fun m -> m "Executing strategy '%s' for symbol '%s'" loaded_strat.name symbol);
+        Strategy_compiler.execute_compiled_strategy loaded_strat.compiled_logic engine.data_manager engine.grpc_clients symbol loaded_strat.state >>= fun result ->
+
+        match result with
+        | Result.Ok (updated_state, actions) ->
+            debug (fun m -> m "Strategy '%s' execution succeeded. Generated %d actions. State updated." loaded_strat.name (List.length actions));
+            (* Update the strategy's state *)
+            loaded_strat.state <- updated_state;
+            (* Actions are executed *within* execute_compiled_strategy by calling grpc_clients *)
+            Lwt.return_unit (* Move to next strategy *)
+        | Result.Error (`ExecutionError msg) ->
+            error (fun m -> m "Strategy '%s' execution failed for symbol '%s': %s" loaded_strat.name symbol msg);
+            Prometheus.Counter.inc strategy_execution_errors_total; (* Increment error metric *)
+            Lwt.return_unit (* Continue with next strategy even if one fails *)
+        (* Add other specific error handling here *)
       ) strategies_to_run (* Await sequential execution of strategies for this symbol *)
-    ) symbols_with_new_data >>= fun () -> (* Await sequential processing of symbols *)
+    ) symbols_with_new_data (* Await sequential processing of symbols *)
+    in
+
     execution_loop engine (* Continue the loop *)
   )
 

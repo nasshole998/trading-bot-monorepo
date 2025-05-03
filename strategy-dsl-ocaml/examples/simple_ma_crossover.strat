@@ -5,7 +5,7 @@ STRATEGY SimpleMACrossover;
 # It uses state variables (position) to avoid repeated orders.
 # Assumes indicators "SMA_20_BTCUSDT" and "SMA_50_BTCUSDT" are available.
 
-# State variable: 0 = no position, 1 = long (bought), -1 = short (sold - not strictly implemented here)
+# State variable: 0 = no position, 1 = long (bought)
 VAR position = 0;
 
 ON DataUpdate("btc_usdt") { # ON is ignored by the interpreter, strategy runs on any data for btc_usdt
@@ -13,27 +13,28 @@ ON DataUpdate("btc_usdt") { # ON is ignored by the interpreter, strategy runs on
     # Assumes the data manager provides enough history (max_history_size >= 2)
     # Using the `.prev` syntax requires the DataManager to efficiently provide the second latest value.
 
-    # Ensure indicators exist before accessing them
-    # The type checker should handle this, but runtime check is safer
-    IF Indicator("SMA_20_BTCUSDT") <> NaN AND Indicator("SMA_50_BTCUSDT") <> NaN AND
-       Indicator("SMA_20_BTCUSDT").prev <> NaN AND Indicator("SMA_50_BTCUSDT").prev <> NaN
-    THEN {
-        SET fast_sma = Indicator("SMA_20_BTCUSDT");
-        SET slow_sma = Indicator("SMA_50_BTCUSDT");
-        SET fast_sma_prev = Indicator("SMA_20_BTCUSDT").prev;
-        SET slow_sma_prev = Indicator("SMA_50_BTCUSDT").prev;
+    # Ensure indicators exist before accessing them (checked by type checker, but runtime can still fail)
+    # Check for NaN is also important after retrieving and converting values
+    SET fast_sma = Indicator("SMA_20_BTCUSDT");
+    SET slow_sma = Indicator("SMA_50_BTCUSDT");
+    SET fast_sma_prev = Indicator("SMA_20_BTCUSDT").prev;
+    SET slow_sma_prev = Indicator("SMA_50_BTCUSDT").prev;
 
+    # Check if all values are valid numbers before proceeding
+    IF fast_sma <> NaN AND slow_sma <> NaN AND
+       fast_sma_prev <> NaN AND slow_sma_prev <> NaN
+    THEN {
         # Check BUY signal: Fast SMA crosses above Slow SMA AND not currently long
         # Crossover condition: current fast > current slow AND previous fast <= previous slow
         IF fast_sma > slow_sma AND fast_sma_prev <= slow_sma_prev AND position == 0 THEN {
             # Execute BUY action with a fixed quantity (e.g., 0.001 BTC)
-            BUY 0.001; # Quantity expression can be used here, e.g., BUY (account_balance * 0.1 / current_price)
+            BUY (ABS(0.001)); # Use ABS function - example
             Log("BUY signal triggered: Fast SMA crossed above Slow SMA."); # Log the event
             SET position = 1; # Update state to indicate we are now long
         } ELSE IF fast_sma < slow_sma AND fast_sma_prev >= slow_sma_prev AND position == 1 THEN {
             # Check SELL signal: Fast SMA crosses below Slow SMA AND currently long
             # Crossover condition: current fast < current slow AND previous fast >= previous slow
-            SELL 0.001; # Execute SELL action with the same quantity (simplistic exit)
+            SELL (ABS(0.001)); # Execute SELL action with the same quantity (simplistic exit)
             Log("SELL signal triggered: Fast SMA crossed below Slow SMA."); # Log the event
             SET position = 0; # Update state to indicate we are now flat
         } ELSE {
@@ -42,9 +43,9 @@ ON DataUpdate("btc_usdt") { # ON is ignored by the interpreter, strategy runs on
             # Log("HOLD (no signal or already in position)."); # Can be noisy, comment out in production
         }
     } ELSE {
-        # Not enough data for crossover check
+        # Not enough valid data for crossover check
         HOLD;
-        Log("HOLD (not enough data for SMA crossover check).");
+        Log("HOLD (not enough valid data for SMA crossover check).");
     }
     # Optional: Log current state and values for debugging
     # Log(position);

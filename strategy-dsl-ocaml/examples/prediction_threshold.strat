@@ -17,17 +17,17 @@ ON DataUpdate("btc_usdt") { # ON is ignored by the interpreter
     SET forecast = Prediction("price_forecast_next_tick_BTCUSDT");
     SET current_price = Indicator("current_price"); # Assuming current_price is exposed as an indicator/data point
 
-    # Ensure data exists before comparing
+    # Ensure data exists and is valid before comparing
     IF forecast <> NaN AND current_price <> NaN AND buy_threshold_multiplier <> NaN AND sell_threshold_multiplier <> NaN
     THEN {
         # Check BUY signal: forecast > current_price * buy_threshold_multiplier AND not currently long
         IF forecast > (current_price * buy_threshold_multiplier) AND position == 0 THEN {
-            BUY 0.001;
+            BUY (ABS(0.001)); # Use ABS function - example
             Log("BUY signal triggered: Forecast significantly above current price.");
             SET position = 1; # Go long
         } ELSE IF forecast < (current_price * sell_threshold_multiplier) AND position == 1 THEN {
             # Check SELL signal: forecast < current_price * sell_threshold_multiplier AND currently long
-            SELL 0.001;
+            SELL (ABS(0.001));
             Log("SELL signal triggered: Forecast significantly below current price.");
             SET position = 0; # Go flat
         } ELSE {
@@ -35,9 +35,9 @@ ON DataUpdate("btc_usdt") { # ON is ignored by the interpreter
             # Log("HOLD (no signal or already in position).");
         }
     } ELSE {
-        # Not enough data for prediction check
+        # Not enough valid data for prediction check
         HOLD;
-        Log("HOLD (not enough data for prediction threshold check).");
+        Log("HOLD (not enough valid data for prediction threshold check).");
     }
     # Optional: Log state and values
     # Log(position);

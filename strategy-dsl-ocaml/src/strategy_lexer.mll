@@ -42,6 +42,7 @@ rule token = parse
 | ')' { RPAREN }
 | '{' { LBRACE }
 | '}' { RBRACE }
+| '; ' { SEMICOLON } (* Add space after semicolon for cleaner lexing? *)
 | ';' { SEMICOLON }
 | ',' { COMMA }
 | '.' { DOT } (* For accessing .prev *)
@@ -64,6 +65,9 @@ rule token = parse
 | "SET"      { K_SET }      (* Variable assignment *)
 | "prev"     { K_prev }     (* Keyword for accessing previous value *)
 
+| "ABS"      { K_ABS }      (* Built-in function *)
+| "MIN"      { K_MIN }      (* Built-in function *)
+| "MAX"      { K_MAX }      (* Built-in function *)
 
 | "Indicator" { K_Indicator } (* Keyword to access current indicator values *)
 | "Prediction" { K_Prediction } (* Keyword to access current prediction values *)

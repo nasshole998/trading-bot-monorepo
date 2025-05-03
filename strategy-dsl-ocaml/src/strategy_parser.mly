@@ -2,6 +2,7 @@
 
 %{
 open Strategy_ast (* The AST definition *)
+open Strategy_typecheck (* Need eval_constant_expr *)
 
 (* Helper for error reporting *)
 let error lexbuf msg =
@@ -23,6 +24,7 @@ let error lexbuf msg =
 %token LPAREN RPAREN LBRACE RBRACE SEMICOLON COMMA DOT
 %token K_STRATEGY K_PARAMS K_INDICATORS K_PREDICTIONS K_ON K_DataUpdate K_IF K_THEN K_ELSE K_BUY K_SELL K_HOLD K_Log K_Indicator K_Prediction K_VAR K_SET K_prev
 %token ASSIGN (* New token for assignment (=) *)
+%token K_ABS K_MIN K_MAX (* Built-in function tokens *)
 %token EOF
 
 (* Define precedence and associativity for binary operators *)
@@ -44,9 +46,13 @@ strategy:
   K_STRATEGY ID SEMICOLON LBRACE statements RBRACE EOF
     {
       let var_decls, other_stmts = extract_var_decls $5 in
-      { name = $2; logic = other_stmts; initial_state = List.map (fun (name, expr) -> (name, Strategy_typecheck.eval_constant_expr expr)) var_decls }
-      (* Evaluate initial VAR expressions at parse/compile time (simplification) *)
-      (* Requires a helper to evaluate expressions that only contain constants *)
+      let initial_state_evaluated = List.map (fun (name, expr) ->
+          match eval_constant_expr expr with (* Evaluate initial VAR expressions *)
+          | Result.Ok value -> (name, value)
+          | Result.Error msg -> error lexbuf (Printf.sprintf "Error evaluating initial value for variable '%s': %s" name msg)
+      ) var_decls
+      in
+      { name = $2; logic = other_stmts; initial_state = initial_state_evaluated }
     }
 
 (* List of statements *)
@@ -97,7 +103,7 @@ and_expr:
 | comp_expr { $1 }
 
 comp_expr:
-  arith_expr EQ arith_expr { Bin_op (EQ, $1, $3) }
+  arith_expr EQ arith_expr { Bin_op (Eq, $1, $3) }
 | arith_expr NEQ arith_expr { Bin_op (Neq, $1, $3) }
 | arith_expr LT arith_expr { Bin_op (Lt, $1, $3) }
 | arith_expr GT arith_expr { Bin_op (Gt, $1, $3) }
@@ -124,8 +130,16 @@ factor:
 | K_Indicator LPAREN STRING RPAREN DOT K_prev { Get_prev_indicator $3 } (* Access previous indicator value *)
 | K_Prediction LPAREN STRING RPAREN DOT K_prev { Get_prev_prediction $3 } (* Access previous prediction value *)
 | ID { Get_var $1 } (* Access state variable by ID *)
+| builtin_func_call { $1 } (* Built-in function calls *)
 | LPAREN expr RPAREN { $2 } (* Parenthesized expression *)
 (* Add other factors: unary minus, etc. *)
+
+(* Built-in function calls *)
+builtin_func_call:
+  K_ABS LPAREN expr RPAREN { Builtin_func (Abs, [$3]) } (* ABS(expr) *)
+| K_MIN LPAREN expr COMMA expr RPAREN { Builtin_func (Min, [$3; $5]) } (* MIN(expr, expr) *)
+| K_MAX LPAREN expr COMMA expr RPAREN { Builtin_func (Max, [$3; $5]) } (* MAX(expr, expr) *)
+(* Add more built-in functions here following the pattern *)
 
 
 (* Error handling - Catch unexpected tokens *)

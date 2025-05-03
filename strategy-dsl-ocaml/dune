@@ -15,7 +15,7 @@
           generated/ml_prediction_grpc.ml
           generated/ml_prediction_grpc.mli)
  (deps
-  (source_tree ../../proto/)) ; Depend on the proto files
+  (source_tree ../../proto/))
  (action
   (run %{bin:protoc}
        --plugin=protoc-gen-ocaml=%{bin:ocaml_protoc}
@@ -55,9 +55,11 @@
   result
   csexp
   uri
-  batteries ; Added batteries dependency
+  batteries
   yojson
-  ppx_lwt ; Added ppx_lwt for let* syntax
+  ppx_lwt
+  prometheus ; Added
+  prometheus-app ; Added
  )
  (modules
   ; Generated modules from protobuf
@@ -83,7 +85,8 @@
   ; Main entry point
   main
  )
- (flags (:standard -warn-error +a -open Lwt)) ; Standard compiler flags, treat all warnings as errors, auto-open Lwt
+ (flags (:standard -warn-error +a -open Lwt))
+ (preprocess (pps ppx_lwt)) ; Enable ppx_lwt
 
  ; Link time dependency on generated modules
  (buildable_libraries generated.market_data_pb generated.market_data_grpc

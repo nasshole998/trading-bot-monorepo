@@ -5,6 +5,8 @@ open Strategy_typecheck_intf (* Include interface file *)
 open Strategy_data (* Need data types for env population *)
 open Lwt.Infix (* For Lwt binds *)
 open Logs (* For logging *)
+open Result (* For Result type *)
+open Batteries.Float (* For nan, isnan *)
 
 exception TypeError of string
 
@@ -23,40 +25,44 @@ let check_type env expr expected_type =
 
 (* Helper to evaluate an expression that only contains constants *)
 let rec eval_constant_expr = function
-  | Const v -> v
+  | Const v -> Result.Ok v
   | Bin_op (op, e1, e2) ->
-      let v1 = eval_constant_expr e1 in
-      let v2 = eval_constant_expr e2 in
-      (match op with
-       | Add | Sub | Mul | Div ->
-           (match v1, v2 with
-            | Numeric f1, Numeric f2 -> Numeric (
-                match op with
-                | Add -> f1 +. f2
-                | Sub -> f1 -. f2
-                | Mul -> f1 *. f2
-                | Div -> if f2 <> 0.0 then f1 /. f2 else nan)
-            | _ -> raise (TypeError "Arithmetic operation on non-numeric constants"))
-       | Eq | Neq -> Boolean (v1 = v2)
-       | Lt | Gt | Leq | Geq ->
-           (match v1, v2 with
-            | Numeric f1, Numeric f2 -> Boolean (
-                match op with
-                | Lt -> f1 < f2
-                | Gt -> f1 > f2
-                | Leq -> f1 <= f2
-                | Geq -> f1 >= f2)
-            | _ -> raise (TypeError "Comparison operation on non-numeric constants"))
-       | And | Or ->
-           (match v1, v2 with
-            | Boolean b1, Boolean b2 -> Boolean (
-                match op with
-                | And -> b1 && b2
-                | Or -> b1 || b2)
-            | _ -> raise (TypeError "Logical operation on non-boolean constants")))
+      let open Result.Infix in
+      eval_constant_expr e1 >>= fun v1 ->
+      eval_constant_expr e2 >>= fun v2 ->
+      Result.Ok (
+          match op with
+          | Add | Sub | Mul | Div ->
+              (match v1, v2 with
+               | Numeric f1, Numeric f2 -> Numeric (
+                   match op with
+                   | Add -> f1 +. f2
+                   | Sub -> f1 -. f2
+                   | Mul -> f1 *. f2
+                   | Div -> if f2 <> 0.0 then f1 /. f2 else nan)
+               | _ -> Result.Error "Arithmetic operation on non-numeric constants")
+          | Eq | Neq -> Boolean (v1 = v2)
+          | Lt | Gt | Leq | Geq ->
+              (match v1, v2 with
+               | Numeric f1, Numeric f2 -> Boolean (
+                   match op with
+                   | Lt -> f1 < f2
+                   | Gt -> f1 > f2
+                   | Leq -> f1 <= f2
+                   | Geq -> f1 >= f2)
+               | _ -> Result.Error "Comparison operation on non-numeric constants")
+          | And | Or ->
+              (match v1, v2 with
+               | Boolean b1, Boolean b2 -> Boolean (
+                   match op with
+                   | And -> b1 && b2
+                   | Or -> b1 || b2)
+               | _ -> Result.Error "Logical operation on non-boolean constants")
+      )
+  | Builtin_func (_, _) -> Result.Error "Cannot evaluate built-in function call at compile time"
   | Get_indicator name | Get_prediction name | Get_prev_indicator name | Get_prev_prediction name | Get_var name ->
       (* Cannot evaluate non-constant expressions at compile time *)
-      raise (TypeError (Printf.sprintf "Cannot evaluate non-constant expression '%s' at compile time" name))
+      Result.Error (Printf.sprintf "Cannot evaluate non-constant expression '%s' at compile time" name)
 
 
 (* Type check an expression *)
@@ -74,7 +80,7 @@ let rec typecheck_expr env = function
   | Get_var name ->
        (match Hashtbl.find_opt env name with
        | Some t -> t (* Variable type is known from declaration *)
-       | None -> raise (TypeError (Printf.sprintf "Undefined variable '%s'" name)))
+       | None -> raise (TypeError (Printf.sprintf "Undeclared variable '%s'" name)))
   | Bin_op (op, e1, e2) ->
       let t1 = typecheck_expr env e1 in
       let t2 = typecheck_expr env e2 in
@@ -88,6 +94,18 @@ let rec typecheck_expr env = function
       | And | Or ->
           if t1 = `Boolean && t2 = `Boolean then `Boolean
           else raise (TypeError "Logical operations require Boolean operands")
+  | Builtin_func (func, args) ->
+      match func, args with
+      | Abs, [e] ->
+          check_type env e `Numeric; `Numeric (* ABS requires Numeric, returns Numeric *)
+      | Min, [e1; e2] | Max, [e1; e2] ->
+          check_type env e1 `Numeric;
+          check_type env e2 `Numeric;
+          `Numeric (* MIN/MAX require two Numeric, return Numeric *)
+      | Abs, _ -> raise (TypeError "ABS function requires exactly 1 argument")
+      | (Min | Max), _ -> raise (TypeError "MIN/MAX functions require exactly 2 arguments")
+      (* Add type checks for other built-in functions *)
+
 
 (* Type check a single action *)
 let typecheck_action env = function
@@ -113,12 +131,8 @@ and typecheck_statement env = function
   | Action action ->
       typecheck_action env action (* Type check the action *)
   | Var_decl (name, initial_expr) ->
-      (* Var_decl statements are processed *before* typechecking statements.
-         Initial types are determined during AST construction/preprocessing.
-         Typechecking here only checks the initial_expr's type consistency if needed,
-         but the primary check is that the name is not already defined. *)
-      (* The parsing step extracts Var_decl, so this branch shouldn't be hit during statement typecheck *)
-      raise (Failure "Var_decl statement encountered during main statement typechecking unexpectedly")
+      (* Var_decl statements are processed *before* typechecking statements. *)
+      () (* Do nothing here, handled during AST processing *)
   | Set_var (name, expr) ->
       (* Check if variable is declared and check type consistency *)
        (match Hashtbl.find_opt env name with
@@ -134,26 +148,17 @@ let typecheck_strategy data_mgr strategy_ast =
   (* Create the initial type environment *)
   let type_env = Hashtbl.create 50 in (* Generous initial size *)
 
-  (* Add known indicators and predictions from DataManager (or config) to the environment.
-     For this task, let's assume we can query the DataManager for the *types*
-     of indicators/predictions it has seen/expects. This is a simplification.
-     A real system might get this list from config or upstream service discovery. *)
-  (* Simplified: Assume all indicators are Numeric, predictions are either Numeric or Boolean.
-     We'll add placeholders for types based on common names or query DataManager for keys. *)
-
-  (* For now, let's get all symbols DataManager is tracking and assume common indicators/predictions *)
-  (* Or, ideally, DataManager has a way to list known indicator/prediction *names*. *)
-  (* Let's add a function to DataManager to get known names. *)
-  Strategy_data.get_known_indicator_names data_mgr >>= fun known_indicators ->
+  (* Add known indicators and predictions from DataManager *)
+  let* known_indicators = Strategy_data.get_known_indicator_names data_mgr in
   known_indicators |> List.iter (fun name -> Hashtbl.add type_env name `Numeric);
   info (fun m -> m "Added %d known indicators to type environment." (List.length known_indicators));
 
-  Strategy_data.get_known_prediction_names data_mgr >>= fun known_predictions ->
+  let* known_predictions = Strategy_data.get_known_prediction_names data_mgr in
   known_predictions |> List.iter (fun name ->
-      (* Infer type based on name pattern (simplified) or query DataManager *)
-      let ptype = if String.contains name '_' then (* Example: "buy_signal_BTCUSDT" *)
+      (* Infer type based on name pattern (simplified) *)
+      let ptype = if String.contains name '_' then
                     match String.split_on_char '_' name |> List.hd with
-                    | "buy" | "sell" | "signal" | "bool" -> `Boolean
+                    | "buy" | "sell" | "signal" | "bool" | "flag" -> `Boolean (* Add more boolean patterns *)
                     | _ -> `Numeric
                   else `Numeric (* Default to numeric if no clear pattern *)
       in
@@ -170,6 +175,12 @@ let typecheck_strategy data_mgr strategy_ast =
       let initial_type = type_of_value initial_value in
       Hashtbl.add type_env name initial_type;
       info (fun m -> m "Added variable '%s' (%s) to type environment." name (match initial_type with `Numeric -> "Numeric" | `Boolean -> "Boolean"));
+  );
+
+  (* Add "current_price" if needed by the DSL and not already added *)
+  if not (Hashtbl.mem type_env "current_price") then (
+    Hashtbl.add type_env "current_price" `Numeric;
+    debug (fun m -> m "Added default 'current_price' (Numeric) to type environment.");
   );
 
 

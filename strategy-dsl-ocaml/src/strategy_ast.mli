@@ -15,7 +15,7 @@ type expr =
   | Get_prev_prediction of string                      (* Get previous prediction value by name *)
   | Get_var of string                                  (* Get strategy state variable value *)
   | Bin_op of bin_op * expr * expr                     (* Binary operation *)
-  (* Add other expression types: Unary_op, Function_call, etc. *)
+  | Builtin_func of builtin_func * expr list           (* Built-in function call *)
 
 (** Types for binary operators. *)
 and bin_op =
@@ -26,6 +26,13 @@ and bin_op =
   (* Logical *)
   | And | Or
 [@@deriving sexp]
+
+(** Types for built-in functions. *)
+and builtin_func =
+  | Abs | Min | Max (* Basic math functions *)
+  (* Add more built-in functions here *)
+[@@deriving sexp]
+
 
 (** Types for actions (things the strategy can do). *)
 type action =
