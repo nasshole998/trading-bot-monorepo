@@ -1,0 +1,43 @@
+(lang dune 3.11)
+
+(using ctypes 0.3) ; OCaml-gRPC uses ctypes
+
+(name strategy_dsl)
+
+(repositories
+ (default
+  (source (copy ../../_opam/repo)))) ; Use a local opam repo if building with opam2nix
+
+(package
+ (name strategy_dsl)
+ (synopsis "Trading Strategy DSL Engine")
+ (description "Parses, compiles, and executes trading strategies based on indicators and predictions.")
+ (depends
+  (ocaml
+   (>= 4.14.0)) ; Or your OCaml version
+  (dune >= 3.0)
+  (menhir)
+  (ocamlllex)
+  (ocaml-protoc >= 0.1) ; Protobuf compiler for OCaml
+  (ocaml-protoc-plugin >= 0.1) ; Protobuf plugin for OCaml
+  (ocaml-grpc >= 0.1) ; gRPC library for OCaml
+  (ocaml-grpc-lwt >= 0.1) ; gRPC library with Lwt backend
+  (lwt >= 5.0) ; Lwt concurrency library
+  (lwt_mutex) ; Lwt mutexes (explicit dependency)
+  (lwt_condition) ; Lwt condition variables (explicit dependency)
+  (cohttp-lwt-unix >= 5.0) ; HTTP server for health checks
+  (logs) ; Logging library
+  (mtime) ; Time handling for logs
+  (ppx_sexp_conv) ; For S-expression conversion (often useful for debugging/serialization)
+  (sexplib) ; Dependency for ppx_sexp_conv
+  (yaml-ez >= 0.1) ; YAML config parsing
+  (uri) ; Used by Cohttp
+  (batteries) ; For Deque and other utilities
+  (yojson) ; Optional: for JSON handling (e.g., in metadata)
+  (ptime) ; Optional: for precise time handling if Dates.jl conversion is tricky
+  (result) ; Use Result type from standard library or compatible package
+  (csexp) ; S-expression parsing/printing
+  (ppx_lwt) ; For let* / and* Lwt syntax
+ ))
+
+(build.prob_rules) ; Enable probability rules for menhir

@@ -4,76 +4,124 @@ package market_data;
 
 import "google/protobuf/timestamp.proto";
 
-// Service for streaming market data from the Ingestion service to consumers.
-service MarketDataService {
-  // Server-side streaming RPC to send market data events to the client.
-  // The client (Indicator/ML Engine) calls this, and the server (Ingestion) streams data back.
-  // Note: The previous idea was client-streaming (Ingestion sends to Indicator/ML).
-  // Let's stick to server-streaming as it's more typical for data feeds.
-  // The client initiates and receives a stream of events.
-  rpc StreamMarketData(StreamMarketDataRequest) returns (stream MarketDataEvent);
+// Enum for trade side
+enum OrderSide {
+  ORDER_SIDE_UNSPECIFIED = 0;
+  ORDER_SIDE_BUY = 1;
+  ORDER_SIDE_SELL = 2;
 }
 
-message StreamMarketDataRequest {
-    // Could include filtering options here later, e.g., list of symbols
+// Enum for order type
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_TYPE_MARKET = 1; // Execute at best available price
+  ORDER_TYPE_LIMIT = 2;  // Execute at a specified price or better
+  // Add other types like STOP, STOP_LIMIT, etc. as needed
+}
+
+// Market data events stream from ingestion service
+service MarketDataService {
+  // Client-streaming RPC to receive real-time market data events from the ingestion service.
+  // The client (Ingestion Service) streams MarketDataEvent messages to the server (other components).
+  rpc StreamMarketData(stream MarketDataEvent) returns (StreamMarketDataResponse);
+
+  // RPC for strategy engine to send trade orders for execution.
+  // This RPC is called by the Strategy Engine (client) on the Data Ingestion Service (server).
+  rpc ExecuteOrder(OrderRequest) returns (OrderResponse);
+
+  // Optional: Server-streaming RPC for order status updates from the ingestion service.
+  // Strategy Engine (client) subscribes here to get updates on its placed orders.
+  // rpc SubscribeToOrderUpdates(OrderUpdateRequest) returns (stream OrderUpdate);
 }
 
 message MarketDataEvent {
-  // Use oneof to represent different types of market data events
-  oneof event {
+  // Use oneof to represent different types of market data
+  oneof event_type {
     Trade trade = 1;
     Quote quote = 2;
-    OrderBookUpdate order_book_update = 3; // Incremental or full update
-    // Add other event types like FundingRate, Kline, etc.
+    OrderBookUpdate order_book_update = 3;
+    # Add other event types like Candlestick, FundingRate, etc.
   }
-  // Could add a sequence number or timestamp here if needed for all events
 }
 
 message Trade {
   string exchange = 1;         // e.g., "binance"
   string symbol = 2;           // e.g., "btc_usdt" (normalized)
-  string id = 3;               // Exchange-specific trade ID
-  string price = 4;            // Use string for Decimal precision
-  string quantity = 5;         // Use string for Decimal precision (base asset)
-  string quote_quantity = 6;   // Use string for Decimal precision (quote asset, price * quantity)
-  OrderSide side = 7;          // BUY or SELL
-  // Exchange-specific IDs, useful for linking trades to orders
-  string buy_order_id = 8;
-  string sell_order_id = 9;
-  google.protobuf.Timestamp timestamp = 10; // Trade timestamp from exchange
+  string trade_id = 3;         // Exchange's trade ID
+  string price = 4;            // Price of the trade (string for precision)
+  string quantity = 5;         // Quantity traded (string for precision)
+  google.protobuf.Timestamp timestamp = 6; // Timestamp of the trade
+  OrderSide side = 7;          // BUY or SELL side of the aggressor
 }
 
 message Quote {
   string exchange = 1;         // e.g., "binance"
-  string symbol = 2;           // e.g., "btc_usdt"
-  string bid_price = 3;        // Best bid price (string for Decimal)
-  string bid_quantity = 4;     // Best bid quantity (string for Decimal)
-  string ask_price = 5;        // Best ask price (string for Decimal)
-  string ask_quantity = 6;     // Best ask quantity (string for Decimal)
-  google.protobuf.Timestamp timestamp = 7; // Quote timestamp
+  string symbol = 2;           // e.g., "btc_usdt" (normalized)
+  string bid_price = 3;        // Best bid price (string)
+  string bid_quantity = 4;     // Quantity available at best bid (string)
+  string ask_price = 5;        // Best ask price (string)
+  string ask_quantity = 6;     // Quantity available at best ask (string)
+  google.protobuf.Timestamp timestamp = 7; // Timestamp of the quote
 }
 
-// Simplified Order Book Update - could be full snapshot or incremental diffs
 message OrderBookUpdate {
-    string exchange = 1;        // e.g., "binance"
-    string symbol = 2;          // e.g., "btc_usdt"
-    repeated OrderBookLevel bids = 3; // List of bid levels (price, quantity)
-    repeated OrderBookLevel asks = 4; // List of ask levels (price, quantity)
-    // Could add update IDs (U/u for Binance) for sequence checking
-    // uint64 first_update_id = 5;
-    // uint64 last_update_id = 6;
-    google.protobuf.Timestamp timestamp = 7; // Timestamp of the update
-    // bool is_snapshot = 8; // Indicate if this is a full snapshot
+  string exchange = 1;          // e.g., "binance"
+  string symbol = 2;            // e.g., "btc_usdt" (normalized)
+  repeated OrderBookLevel bids = 3; // List of bid levels (price, quantity)
+  repeated OrderBookLevel asks = 4; // List of ask levels (price, quantity)
+  google.protobuf.Timestamp timestamp = 5; // Timestamp of the update
+  bool is_snapshot = 6;         // True if this is a full order book snapshot
+  int64 sequence_number = 7;    // Sequence number for handling updates
 }
 
 message OrderBookLevel {
-    string price = 1;    // String for Decimal precision
-    string quantity = 2; // String for Decimal precision
+  string price = 1;             // Price level (string)
+  string quantity = 2;          // Quantity at this level (string)
 }
 
-// Define common enums (can reuse this or define separately in each proto)
-enum OrderSide {
-    SIDE_UNKNOWN = 0; // Default value
-    BUY = 1;
-    SELL = 2;
+message StreamMarketDataResponse {
+  // Currently empty, as the server streams data back only if needed
+  // (e.g., acknowledgment of connection).
+  // For a client streaming RPC, the response is sent once at the end.
+  // If real-time server status updates were needed, this would be a stream response.
 }
+
+
+// --- Messages and RPC for Order Execution ---
+
+message OrderRequest {
+  string client_order_id = 1;   // Unique ID generated by the client (Strategy Engine)
+  string exchange = 2;          // Target exchange for the order
+  string symbol = 3;            // Trading pair symbol
+  OrderSide side = 4;           // BUY or SELL
+  OrderType type = 5;           // MARKET or LIMIT, etc.
+  string quantity = 6;          // Amount to buy/sell (string for precision)
+  string price = 7;             // Price for LIMIT orders (string, ignored for MARKET)
+  // Add other parameters like time_in_force, stop_price, etc.
+}
+
+message OrderResponse {
+  string client_order_id = 1;   // The client_order_id from the request
+  string exchange_order_id = 2; // The order ID assigned by the exchange
+  string status = 3;            // Current status of the order (e.g., "ACKNOWLEDGED", "FILLED", "REJECTED")
+  string message = 4;           // Optional message (e.g., rejection reason)
+  google.protobuf.Timestamp timestamp = 5; // Timestamp of the response
+  // Add filled quantity, average fill price, etc.
+}
+
+// message OrderUpdateRequest {
+//   // Define criteria for updates if not subscribing to all orders
+//   repeated string client_order_ids = 1;
+//   repeated string exchange_order_ids = 2;
+//   repeated string symbols = 3;
+// }
+
+// message OrderUpdate {
+//   string client_order_id = 1;
+//   string exchange_order_id = 2;
+//   string symbol = 3;
+//   string status = 4; // e.g., "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "REJECTED"
+//   string message = 5;
+//   google.protobuf.Timestamp timestamp = 6;
+//   // Add quantity, cumulative_filled_quantity, latest_fill_price, etc.
+// }

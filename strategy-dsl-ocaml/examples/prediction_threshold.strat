@@ -1,0 +1,46 @@
+STRATEGY PredictionThreshold;
+
+# This strategy buys if the ML price forecast is significantly
+# above the current price and sells if it's significantly below,
+# using state variables to track position.
+# Assumes prediction "price_forecast_next_tick_BTCUSDT" and
+# indicator "current_price" are available.
+
+VAR position = 0; # 0 = flat, 1 = long
+
+# Set thresholds for buy/sell relative to current price (e.g., 1% above/below)
+VAR buy_threshold_multiplier = 1.01;
+VAR sell_threshold_multiplier = 0.99;
+
+ON DataUpdate("btc_usdt") { # ON is ignored by the interpreter
+    # Get current price and the prediction value
+    SET forecast = Prediction("price_forecast_next_tick_BTCUSDT");
+    SET current_price = Indicator("current_price"); # Assuming current_price is exposed as an indicator/data point
+
+    # Ensure data exists before comparing
+    IF forecast <> NaN AND current_price <> NaN AND buy_threshold_multiplier <> NaN AND sell_threshold_multiplier <> NaN
+    THEN {
+        # Check BUY signal: forecast > current_price * buy_threshold_multiplier AND not currently long
+        IF forecast > (current_price * buy_threshold_multiplier) AND position == 0 THEN {
+            BUY 0.001;
+            Log("BUY signal triggered: Forecast significantly above current price.");
+            SET position = 1; # Go long
+        } ELSE IF forecast < (current_price * sell_threshold_multiplier) AND position == 1 THEN {
+            # Check SELL signal: forecast < current_price * sell_threshold_multiplier AND currently long
+            SELL 0.001;
+            Log("SELL signal triggered: Forecast significantly below current price.");
+            SET position = 0; # Go flat
+        } ELSE {
+            HOLD;
+            # Log("HOLD (no signal or already in position).");
+        }
+    } ELSE {
+        # Not enough data for prediction check
+        HOLD;
+        Log("HOLD (not enough data for prediction threshold check).");
+    }
+    # Optional: Log state and values
+    # Log(position);
+    # Log(forecast);
+    # Log(current_price);
+}

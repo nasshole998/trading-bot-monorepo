@@ -1,0 +1,96 @@
+(lang dune 3.11)
+
+; Rule to generate Protobuf/gRPC OCaml code
+(rule
+ (targets generated/market_data_pb.ml
+          generated/market_data_pb.mli
+          generated/market_data_grpc.ml
+          generated/market_data_grpc.mli
+          generated/indicator_data_pb.ml
+          generated/indicator_data_pb.mli
+          generated/indicator_data_grpc.ml
+          generated/indicator_data_grpc.mli
+          generated/ml_prediction_pb.ml
+          generated/ml_prediction_pb.mli
+          generated/ml_prediction_grpc.ml
+          generated/ml_prediction_grpc.mli)
+ (deps
+  (source_tree ../../proto/)) ; Depend on the proto files
+ (action
+  (run %{bin:protoc}
+       --plugin=protoc-gen-ocaml=%{bin:ocaml_protoc}
+       --plugin=protoc-gen-ocaml-grpc=%{bin:ocaml_protoc_plugin}
+       -I ../../proto/
+       --ocaml_out=generated/
+       --ocaml-grpc_out=generated/
+       ../../proto/market_data.proto
+       ../../proto/indicator_data.proto
+       ../../proto/ml_prediction.proto)))
+
+; Rule to generate lexer and parser from .mll and .mly files
+(rule
+ (targets strategy_lexer.ml strategy_parser.ml strategy_parser.mli)
+ (deps strategy_lexer.mll strategy_parser.mly)
+ (action
+  (run %{bin:ocamlllex} -o %{targets:strategy_lexer.ml} %{deps:strategy_lexer.mll})
+  (run %{bin:menhir} --ocaml-parser --dump --explain --infer --eol-in-comments --compare-errors --warn-value-ignored --warn-untouchable-union --warn-unused --warn-parameter --warn-error all strategy_parser.mly --outfile %{targets:strategy_parser.ml})))
+
+
+(executable
+ (name main)
+ (libraries
+  lwt
+  lwt.unix
+  lwt_mutex
+  lwt_condition
+  cohttp-lwt-unix
+  logs
+  mtime
+  yaml-ez
+  ocaml-grpc-lwt
+  ocaml-protoc
+  ocaml-protoc-plugin
+  ppx_sexp_conv
+  sexplib
+  result
+  csexp
+  uri
+  batteries ; Added batteries dependency
+  yojson
+  ppx_lwt ; Added ppx_lwt for let* syntax
+ )
+ (modules
+  ; Generated modules from protobuf
+  generated.market_data_pb
+  generated.market_data_grpc
+  generated.indicator_data_pb
+  generated.indicator_data_grpc
+  generated.ml_prediction_pb
+  generated.ml_prediction_grpc
+
+  ; DSL modules
+  strategy_ast
+  strategy_lexer
+  strategy_parser
+  strategy_typecheck
+  strategy_compiler
+  strategy_data
+  strategy_grpc
+  strategy_config
+  strategy_health_check
+  strategy_engine
+
+  ; Main entry point
+  main
+ )
+ (flags (:standard -warn-error +a -open Lwt)) ; Standard compiler flags, treat all warnings as errors, auto-open Lwt
+
+ ; Link time dependency on generated modules
+ (buildable_libraries generated.market_data_pb generated.market_data_grpc
+                      generated.indicator_data_pb generated.indicator_data_grpc
+                      generated.ml_prediction_pb generated.ml_prediction_grpc))
+
+; Alias for running tests (optional)
+; (alias
+;  (name runtest)
+;  (deps (:executable main)))

@@ -1,0 +1,35 @@
+# Configuration for the Strategy DSL Engine
+
+# gRPC configuration for this service (serving health checks)
+grpc: # Using grpc section name for consistency, even if only health check is gRPC/HTTP
+  listen_address: "0.0.0.0:50053" # Address where this service listens for health checks (e.g., HTTP)
+
+# Addresses for upstream gRPC services
+upstream_grpc:
+  indicator_engine_address: "localhost:50051" # Address of the Indicator Engine gRPC server
+  ml_engine_address: "localhost:50052" # Address of the ML Engine gRPC server
+  data_ingestion_address: "localhost:50050" # Address of the Data Ingestion gRPC server (for order execution)
+
+# Configuration for strategy execution
+strategy_engine:
+  # Path to the directory containing strategy files (*.strat)
+  strategies_path: "examples"
+  # List of strategy files to load and run (relative to strategies_path)
+  active_strategies:
+    - simple_ma_crossover.strat
+    - prediction_threshold.strat
+    # - other_strategy.strat
+
+# Data management configuration
+data:
+  # Maximum number of recent indicator/prediction values to store per item.
+  # Set this to at least 2 if using the '.prev' syntax in strategies.
+  max_history_size: 10 # Store enough history for '.prev' and potential future extensions
+
+# Health check configuration
+health_check:
+  listen_address: "0.0.0.0:8082" # Address for the HTTP health check server
+
+# Optional: Logging configuration
+logging:
+  level: "Debug" # Debug, Info, Warning, Error, App
