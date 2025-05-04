@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package discovery_service;
+
+import "google/protobuf/timestamp.proto"; // For timestamp metadata
+
+// Service for registering and discovering service instances
+service DiscoveryService {
+  // Register a service instance with the discovery service
+  rpc RegisterService(RegisterServiceRequest) returns (RegisterServiceResponse);
+
+  // Lookup service instances by name and version
+  rpc LookupService(LookupServiceRequest) returns (LookupServiceResponse);
+
+  // Optional: Add heartbeating or streaming RPCs for more dynamic discovery
+  // rpc SendHeartbeat(SendHeartbeatRequest) returns (SendHeartbeatResponse);
+  // rpc StreamServiceUpdates(StreamServiceUpdatesRequest) returns (stream ServiceInstance);
+}
+
+// Details of a service instance to register or return in lookup
+message ServiceInstance {
+  string service_name = 1;        // Name of the service (e.g., "risk-management")
+  string service_version = 2;     // Version of the service (e.g., "v1.0.0")
+  string address = 3;             // Network address (e.g., "192.168.1.10:50056", "localhost:50056")
+  google.protobuf.Timestamp registration_timestamp = 4; // Timestamp of registration
+  // Add other metadata here (e.g., status, tags, health check endpoint)
+}
+
+// Request to register a service instance
+message RegisterServiceRequest {
+  ServiceInstance instance = 1; // The service instance details
+}
+
+// Response after attempting to register a service instance
+message RegisterServiceResponse {
+  bool success = 1;         // True if registration was successful
+  string error_message = 2; // Details if success is false
+}
+
+// Request to lookup service instances
+message LookupServiceRequest {
+  string service_name = 1;    // Name of the service to find
+  string service_version = 2; // Version of the service to find (use "*" for any version?)
+  // Add filters here (e.g., specific tags, minimum status)
+}
+
+// Response containing a list of found service instances
+message LookupServiceResponse {
+  bool success = 1;                     // True if the lookup was successful (list might be empty)
+  string error_message = 2;             // Details if success is false
+  repeated ServiceInstance instances = 3; // List of found service instances
+}
+
+// Optional: Messages for heartbeat or streaming
+// message SendHeartbeatRequest { string service_name = 1; string instance_id = 2; }
+// message SendHeartbeatResponse { bool success = 1; string error_message = 2; }
+// message StreamServiceUpdatesRequest { string service_name = 1; string service_version = 2; }

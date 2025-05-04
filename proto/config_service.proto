@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package config_service;
+
+// Service for retrieving configuration data
+service ConfigService {
+  // Get the configuration for a specific service and version
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+
+  // Optional: Add a stream RPC for watching config changes in the future
+  // rpc WatchConfig(WatchConfigRequest) returns (stream ConfigUpdate);
+}
+
+// Request to get configuration for a service
+message GetConfigRequest {
+  string service_name = 1;    // Name of the service (e.g., "risk-management", "backtester")
+  string service_version = 2; // Version of the service (e.g., "v1.0.0", "latest")
+}
+
+// Response containing the requested configuration data
+message GetConfigResponse {
+  bool success = 1;           // True if configuration was found and retrieved
+  string error_message = 2;   // Details if success is false
+  bytes config_data = 3;      // The configuration content (e.g., YAML or JSON bytes)
+}
+
+// Optional: Messages for WatchConfig stream
+// message WatchConfigRequest {
+//   string service_name = 1;
+//   string service_version = 2;
+// }
+
+// message ConfigUpdate {
+//   google.protobuf.Timestamp timestamp = 1;
+//   bytes config_data = 2; // The new configuration content
+// }

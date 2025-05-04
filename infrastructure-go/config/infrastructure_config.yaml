@@ -1,0 +1,10 @@
+# Configuration for the infrastructure-go service itself
+
+grpc:
+  # Address where the Infrastructure services (Config and Discovery) listen
+  listen_address: "0.0.0.0:50060" # Both services share the same listener
+
+# Directory where service configuration files are stored (for ConfigService)
+configs_directory: "./configs_data"
+
+# Add other infrastructure service configurations here (e.g., logging settings)
