@@ -1,0 +1,44 @@
+# trading-bot-monorepo/risk-management-rust-coq/Cargo.toml
+
+[package]
+name = "risk-management-rust-coq"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT"
+
+[[bin]]
+name = "risk-management-rust-coq"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.36.0", features = ["full"] } # Async runtime
+tonic = "0.11.0" # gRPC framework
+prost = "0.12.3" # Protobuf serialization
+prost-types = "0.12.3" # Protobuf well-known types (Timestamp etc.)
+tokio-stream = "0.1.14" # For gRPC streams
+tower = { version = "0.4.13", features = ["timeout", "limit"] } # Middleware for services (optional but useful)
+uuid = { version = "1.7.0", features = ["v4", "fast-rng", "macro-diagnostics"] } # For generating unique IDs
+chrono = { version = "0.4.34", features = ["serde", "rfc3339"] } # For time handling
+serde = { version = "1.0.197", features = ["derive"] } # For serialization (config)
+serde_yaml = "0.9.32" # For YAML config
+lazy_static = "1.4.0" # For static initializers
+tracing = "0.1.40" # For logging/tracing
+tracing-subscriber = "0.3.18" # For logging setup
+thiserror = "1.0.58" # For custom error types
+
+# For thread-safe state
+parking_lot = "0.12.1" # Faster mutexes/rwlocks than std::sync
+
+# Decimal precision (crucial for finance)
+rust_decimal = "1.35.0"
+rust_decimal_macros = "1.35.0" # For decimal literals
+
+# For parsing decimals from strings with better error handling
+rust_decimal_macros = "1.35.0"
+rust_decimal_prs = "0.1.0" # Helper for decimal parsing results
+
+[build-dependencies]
+tonic-build = "0.11.0"
+prost-build = "0.12.3"
+glob = "0.3.1"

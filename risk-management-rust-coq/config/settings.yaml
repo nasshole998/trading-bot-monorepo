@@ -1,0 +1,35 @@
+# Configuration for the Rust Risk Management service
+
+grpc:
+  # Address where this service listens for requests from Strategy Engine
+  listen_address: "0.0.0.0:50056"
+  # Address of the Data Ingestion service (or service providing Execution & AccountState)
+  data_service_address: "localhost:50052"
+  # Address of the Strategy Engine service (for reporting decisions back)
+  strategy_engine_address: "localhost:50050" # Assuming Strategy Engine listens on 50050
+
+
+# Default account ID to manage if not specified in action requests
+default_account_id: "trading_account_1"
+
+
+risk_limits:
+  # Max total exposure per symbol (in quote asset value, e.g., USD)
+  max_symbol_exposure_quote:
+    BTCUSDT: 100000.0 # Example: Max $100,000 exposure in BTCUSDT
+    ETHUSDT: 50000.0
+  # Max total net exposure across all symbols (sum of absolute values of exposure)
+  max_total_net_exposure_quote: 200000.0 # Example: Max $200,000 total net exposure
+  # Max percentage drawdown allowed before stopping trading (based on equity)
+  max_drawdown_percent: 0.10 # Example: Stop trading if equity drops by 10% from peak
+  # Max order size (in base asset quantity)
+  max_order_quantity:
+    BTCUSDT: 0.1 # Example: Max 0.1 BTC per order
+    ETHUSDT: 1.0
+  # Max order size (in quote asset value, calculated using current market price)
+  max_order_value_quote: 50000.0 # Example: Max $50,000 per order
+  # Max daily realized loss (in quote asset)
+  max_daily_realized_loss: 1000.0 # Example: Max $1,000 realized loss per day
+  # Add other risk limits here
+
+# Add logging configuration if using a logging framework that supports config files

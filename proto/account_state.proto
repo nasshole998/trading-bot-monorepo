@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package account_state;
+
+import "google/protobuf/timestamp.proto";
+import "market_data.proto"; // For OrderSide, OrderType, OrderStatus
+
+// Service for providing real-time account state and execution reports.
+// Data Ingestion or a dedicated Account Service would implement this.
+service AccountStateService {
+  // Server-streaming RPC to subscribe to real-time account state updates.
+  rpc SubscribeToAccountUpdates(SubscribeToAccountUpdatesRequest) returns (stream AccountUpdate);
+
+  // Server-streaming RPC to subscribe to execution reports/order fills.
+  // This supplements MarketDataService::SubscribeToOrderUpdates with fill details.
+  rpc SubscribeToExecutionReports(SubscribeToExecutionReportsRequest) returns (stream ExecutionReport);
+
+  // Optional: RPC to get a one-time snapshot of the current account state.
+  // rpc GetAccountSnapshot(GetAccountSnapshotRequest) returns (AccountSnapshot);
+}
+
+message SubscribeToAccountUpdatesRequest {
+  string account_id = 1; // Account ID to subscribe to (empty string for all?)
+  // Add other filtering criteria
+}
+
+message AccountUpdate {
+  string account_id = 1;
+  google/protobuf/timestamp.proto.Timestamp timestamp = 2;
+  string total_equity = 3;       // Total equity (string for precision)
+  string total_capital = 4;      // Total available capital/cash (string)
+  // Add detailed breakdowns (e.g., margin usage, open P/L, position details per symbol)
+  repeated SymbolPosition positions = 5; // Current positions per symbol
+  repeated OpenOrder open_orders = 6; // Currently open orders
+}
+
+message SymbolPosition {
+    string symbol = 1;
+    market_data.OrderSide side = 2; // Long or Short (or UNSPECIFIED for flat)
+    string quantity = 3;          // Position size (string)
+    string avg_entry_price = 4;   // Average entry price (string)
+    string unrealized_pnl = 5;    // Unrealized P/L for this position (string)
+    // Add other position metrics (e.g., margin allocated)
+}
+
+message OpenOrder {
+    string exchange_order_id = 1;
+    string client_order_id = 2; // Original client ID
+    string symbol = 3;
+    market_data.OrderSide side = 4;
+    market_data.OrderType type = 5;
+    market_data.OrderStatus status = 6;
+    string quantity = 7;          // Total order quantity
+    string filled_quantity = 8;   // Quantity filled so far
+    string price = 9;             // Order price (for Limit etc.)
+    google/protobuf/timestamp.proto.Timestamp placed_time = 10;
+    // Add other order details (e.g., fees, update time)
+}
+
+
+message SubscribeToExecutionReportsRequest {
+  string account_id = 1; // Account ID to subscribe to (empty string for all?)
+  // Add other filtering criteria
+}
+
+// Execution report for a single fill or order status change.
+// Includes realized P/L for the portion of the trade that was closed (if applicable).
+message ExecutionReport {
+  string account_id = 1;
+  google/protobuf/timestamp.proto.Timestamp timestamp = 2;
+  string exchange_order_id = 3;
+  string client_order_id = 4; // Original client ID (from Strategy Engine or Risk Manager)
+  string symbol = 5;
+  market_data.OrderSide side = 6; // Side of the fill (BUY or SELL part of the order)
+  market_data.OrderStatus status = 7; // Current status of the order
+  string filled_quantity = 8; // Quantity filled in *this* specific report/fill event
+  string cumulative_filled_quantity = 9; // Total quantity filled for the order
+  string fill_price = 10;     // Price of *this* specific fill
+  string commission = 11;     // Commission for *this* specific fill
+  string commission_asset = 12; // Asset in which commission was paid
+  optional string realized_pnl = 14; // **NEW:** Realized P/L for THIS fill event (if closing a position)
+  string message = 13;        // Optional message (e.g., rejection reason)
+  // Add other details (e.g., trade ID from exchange, average fill price for the order)
+}
+
+// message GetAccountSnapshotRequest {
+//   string account_id = 1;
+// }
+
+// message AccountSnapshot {
+//   string account_id = 1;
+//   google/protobuf/timestamp.proto.Timestamp timestamp = 2;
+//   string total_equity = 3;
+//   string total_capital = 4;
+//   repeated SymbolPosition positions = 5;
+//   repeated OpenOrder open_orders = 6;
+//   // Add other snapshot details
+// }
+
+// message RiskStateUpdate {
+//   // Message structure to manually push state updates if not using streams
+//   // (Less preferred than streams)
+// }
+
+// message UpdateRiskStateResponse {
+//   bool success = 1;
+//   string message = 2;
+// }

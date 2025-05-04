@@ -39,3 +39,31 @@ message ReloadStrategiesResponse {
 //   bool is_active = 3;
 //   // Add other relevant info
 // }
+
+import "google/protobuf/timestamp.proto";
+import "market_data.proto"; // For OrderSide, OrderType
+
+// Service provided by the Strategy Engine component
+service StrategyEngineService {
+  // ... (Other RPCs Strategy Engine provides) ...
+
+  // RPC for the Risk Management component to report the outcome of an action evaluation.
+  // This allows the Strategy Engine to track approved/denied actions and update its internal state or metrics.
+  rpc ReportRiskDecision(ReportRiskDecisionRequest) returns (ReportRiskDecisionResponse);
+}
+
+// Represents a report from Risk Management back to Strategy Engine
+message ReportRiskDecisionRequest {
+    string client_action_id = 1; // The original action ID from Strategy Engine
+    bool approved = 2;           // True if approved, false if denied
+    string reason = 3;           // Reason for the decision
+    google/protobuf/timestamp.proto.Timestamp timestamp = 4; // Timestamp of the decision
+    optional string risk_manager_order_id = 5; // The ID assigned by RM if approved and sent for execution
+    // Add other relevant details from the risk decision
+}
+
+// Response from Strategy Engine after receiving the risk decision report (can be empty)
+message ReportRiskDecisionResponse {
+    bool success = 1;
+    string message = 2;
+}
