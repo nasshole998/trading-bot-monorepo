@@ -3,52 +3,116 @@ syntax = "proto3";
 package backtester;
 
 import "google/protobuf/timestamp.proto";
-import "market_data.proto"; // To potentially reuse OrderSide, OrderType enums
+import "market_data.proto"; // Assuming this contains necessary enums like OrderSide, OrderType
 
-// Service for requesting strategy backtests
+// Service for interacting with the backtesting engine
 service BacktesterService {
-  // RPC to submit a strategy definition and get backtest results
-  rpc BacktestStrategy(BacktestRequest) returns (BacktestResponse);
+  // Start a new backtest run asynchronously
+  rpc BacktestStrategy(BacktestStrategyRequest) returns (BacktestStrategyResponse);
+
+  // Get a list of all completed backtest runs (summary)
+  rpc ListBacktests(ListBacktestsRequest) returns (ListBacktestsResponse);
+
+  // **NEW:** Get detailed results for a specific backtest run by its ID
+  rpc GetBacktestResult(GetBacktestResultRequest) returns (BacktestResult);
 }
 
-message BacktestRequest {
-  string strategy_name = 1;
-  string strategy_dsl_code = 2; // The strategy logic in OCaml DSL text format
-  string symbol = 3;           // The trading pair to backtest on
-  google.protobuf.Timestamp start_time = 4; // Historical data start time
-  google.protobuf.Timestamp end_time = 5;   // Historical data end time
-  double initial_capital = 6;  // Starting capital for the backtest
-
-  // Fields for specifying an ML model to use for historical predictions
-  // If these are empty, the backtest uses only available market data and potentially hardcoded logic.
-  optional string ml_model_id = 7;
-  optional string ml_model_version = 8;
-
-  // Add other parameters like trading fees, slippage settings, etc.
+// Request to start a backtest
+message BacktestStrategyRequest {
+  string strategy_dsl = 1; // The strategy defined in the DSL
+  string symbol = 2;         // Trading pair (e.g., "BTCUSDT")
+  google.protobuf.Timestamp start_time = 3;
+  google.protobuf.Timestamp end_time = 4;
+  // Add other parameters like initial capital, fees, etc.
+  string initial_capital = 5; // String for precision
+  // Add optional ML model parameters
+  optional string ml_model_id = 6;
+  optional string ml_model_version = 7;
 }
 
-message BacktestResponse {
-  bool success = 1;          // True if backtest ran successfully
-  string error_message = 2;  // Details if success is false
-  double total_profit = 3;   // Net profit/loss
-  double max_drawdown = 4;   // Maximum drawdown
-  double sharpe_ratio = 5;   // Sharpe ratio (or other risk-adjusted metric)
-  int32 total_trades = 6;    // Number of trades executed
-  // Add other relevant metrics (e.g., win rate, profit factor, list of trades)
-  repeated BacktestTrade trade_history = 7; // Optional: list of trades
-  double win_rate = 9; // Added metric
-  double profit_factor = 10; // Added metric
-  double sortino_ratio = 11; // Added metric
-
+// Response after starting a backtest
+message BacktestStrategyResponse {
+  string backtest_id = 1; // Unique ID for the started backtest run
+  bool success = 2;       // True if the backtest was started successfully
+  string error_message = 3; // Details if success is false
 }
 
-message BacktestTrade {
-  string symbol = 1;
-  market_data.OrderSide side = 2; // Reuse enum from market_data
-  string entry_price = 3; // Price trade was entered (string for precision)
-  string exit_price = 4;  // Price trade was exited (string for precision)
-  string quantity = 5;    // Quantity traded (string for precision)
-  google.protobuf.Timestamp entry_time = 6;
-  google.protobuf.Timestamp exit_time = 7;
-  string profit_loss = 8; // Profit/Loss for this trade (string for precision)
+// Request to list backtests (currently empty)
+message ListBacktestsRequest {}
+
+// Response containing a list of backtest run summaries
+message ListBacktestsResponse {
+  repeated BacktestResultSummary summaries = 1;
+}
+
+// Summary of a backtest run (for listing)
+message BacktestResultSummary {
+  string id = 1; // Unique ID for the backtest run
+  string strategy_name = 2;
+  string symbol = 3;
+  google.protobuf.Timestamp start_time = 4;
+  google.protobuf.Timestamp end_time = 5;
+  bool success = 6;
+  string error_message = 7;
+  // Add key metrics here if available in summary (string for precision)
+  optional string total_profit = 8;
+  optional string sharpe_ratio = 9;
+  optional string max_drawdown = 10;
+  optional string win_rate = 11;
+  optional string profit_factor = 12;
+  optional int32 total_trades = 13;
+}
+
+// **NEW:** Request to get detailed backtest results
+message GetBacktestResultRequest {
+  string backtest_id = 1; // The ID of the backtest run
+}
+
+// **NEW:** Detailed results of a backtest run
+message BacktestResult {
+  BacktestResultSummary summary = 1; // Reuse the summary info
+  BacktestMetrics metrics = 2;       // Detailed metrics
+  repeated TradeResult trades = 3;    // List of executed trades
+  repeated EquityPoint equity_curve = 4; // Data points for the equity curve
+  // Add other detailed results like logs, configuration used, etc.
+}
+
+// **NEW:** Detailed backtest metrics
+message BacktestMetrics {
+  string total_profit = 1;       // String for precision (e.g., "123.45")
+  string total_fees = 2;
+  string sharpe_ratio = 3;
+  string sortino_ratio = 4;
+  string max_drawdown = 5;
+  string win_rate = 6;
+  string loss_rate = 7;
+  string profit_factor = 8;
+  string average_profit_per_trade = 9;
+  string average_loss_per_trade = 10;
+  string largest_winning_trade = 11;
+  string largest_losing_trade = 12;
+  int32 total_trades = 13;
+  int32 winning_trades = 14;
+  int32 losing_trades = 15;
+  // Add more metrics as needed
+}
+
+// **NEW:** Details of an executed trade
+message TradeResult {
+  string id = 1; // Unique ID for the trade (optional, exchange/internal)
+  string symbol = 2;
+  market_data.OrderSide side = 3; // BUY or SELL
+  string quantity = 4;       // Quantity of the trade
+  string price = 5;          // Execution price
+  google.protobuf.Timestamp timestamp = 6; // Timestamp of execution
+  string fee = 7;            // Fee incurred by this trade
+  string fee_asset = 8;      // Asset the fee was paid in
+  string realized_pnl = 9;   // Realized P/L from this trade (if closing a position)
+  // Add other trade details (e.g., order IDs, liquidation status)
+}
+
+// **NEW:** A single point on the equity curve
+message EquityPoint {
+  google.protobuf.Timestamp timestamp = 1; // Timestamp of the point
+  string equity = 2;        // Total equity value at this point (string for precision)
 }

@@ -1,0 +1,65 @@
+# src/lib/graphql/queries/backtests.graphql
+
+# Define the query to list backtests
+query ListBacktests {
+  listBacktests {
+    id
+    strategyName
+    symbol
+    startTime
+    endTime
+    success
+    # Add summary metrics if needed in list view
+    # totalProfit
+    # sharpeRatio
+  }
+}
+
+# **NEW:** Define the query to get detailed backtest results by ID
+query GetBacktestDetails($backtestId: ID!) {
+  backtest(id: $backtestId) {
+    id
+    strategyName
+    symbol
+    startTime
+    endTime
+    success
+    errorMessage
+
+    # Include detailed fields
+    metrics {
+      totalProfit
+      totalFees
+      sharpeRatio
+      sortinoRatio
+      maxDrawdown
+      winRate
+      lossRate
+      profitFactor
+      averageProfitPerTrade
+      averageLossPerTrade
+      largestWinningTrade
+      largestLosingTrade
+      totalTrades
+      winningTrades
+      losingTrades
+    }
+
+    trades {
+      # id # Optional ID field
+      symbol
+      side
+      quantity
+      price
+      timestamp
+      fee
+      feeAsset
+      realizedPnl
+    }
+
+    equityCurve {
+      timestamp
+      equity
+    }
+  }
+}

@@ -1,0 +1,80 @@
+# graph/schema.graphqls
+
+# Define the root query type
+type Query {
+  # List all available backtest summaries
+  listBacktests: [Backtest!]!
+
+  # **NEW:** Get detailed results for a single backtest by its ID
+  backtest(id: ID!): Backtest # Returns a single Backtest object
+}
+
+# Define the Backtest type matching the data from the Backtester service
+type Backtest {
+  id: ID!
+  strategyName: String!
+  symbol: String!
+  startTime: String!
+  endTime: String!
+  success: Boolean!
+  errorMessage: String
+
+  # **NEW:** Add fields for detailed results
+  metrics: BacktestMetrics
+  trades: [Trade!]!
+  equityCurve: [EquityPoint!]!
+}
+
+# **NEW:** Define type for detailed backtest metrics
+type BacktestMetrics {
+  totalProfit: String! # Use String for precision numbers
+  totalFees: String!
+  sharpeRatio: String!
+  sortinoRatio: String!
+  maxDrawdown: String!
+  winRate: String!
+  lossRate: String!
+  profitFactor: String!
+  averageProfitPerTrade: String!
+  averageLossPerTrade: String!
+  largestWinningTrade: String!
+  largestLosingTrade: String!
+  totalTrades: Int!
+  winningTrades: Int!
+  losingTrades: Int!
+  # Add more metrics here
+}
+
+# **NEW:** Define type for an executed trade
+type Trade {
+  id: ID
+  symbol: String!
+  side: OrderSide! # Use the enum defined below
+  quantity: String!
+  price: String!
+  timestamp: String!
+  fee: String!
+  feeAsset: String!
+  realizedPnl: String # Optional field
+  # Add more trade details
+}
+
+# **NEW:** Define type for an equity curve point
+type EquityPoint {
+  timestamp: String!
+  equity: String!
+}
+
+# **NEW:** Define enums for OrderSide (mirroring protobuf or market_data.proto)
+# Ensure this matches what your backend returns
+enum OrderSide {
+  BUY
+  SELL
+  UNKNOWN_ORDER_SIDE # Handle potential unknown values
+}
+
+# Define required inputs (none for listBacktests query)
+# input NewTodo {
+#   text: String!
+#   userId: ID!
+# }

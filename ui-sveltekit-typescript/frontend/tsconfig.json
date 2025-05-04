@@ -1,0 +1,12 @@
+{
+	"extends": "./.svelte-kit/tsconfig.json",
+	"compilerOptions": {
+		"esModuleInterop": true, // Recommended for SvelteKit + TS
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"sourceMap": true,
+		// See more examples at https://kit.svelte.dev/docs/typescript
+		"strict": true
+	}
+}

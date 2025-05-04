@@ -1,0 +1,58 @@
+# .gqlgen.yml
+#
+# This is an example configuration file for gqlgen
+
+# Where your schema is located
+schema:
+  - graph/schema.graphqls
+
+# Where your models should go
+model:
+  filename: graph/model_gen.go
+  package: graph
+
+# Where your resolvers should go
+resolver:
+  layout: follow-schema # Creates resolver files based on schema structure
+  dir: graph
+  filename: resolver.go # Default file for resolver implementations
+  package: graph
+
+# Where to put the generated code
+exec:
+  filename: graph/schema.generated.go
+  package: graph
+
+# Uncomment to enable federation
+# federation:
+#   filename: graph/federation.go
+#   package: graph
+
+# Optional: turn on struct validation with custom tags
+# validate:
+#   # Each field must have a go tag like `json:"name" binding:"required"`
+#   enable: false
+
+# Optional: skip creating a struct for this type in model_gen.go
+# skip_resolver:
+#   - Todo
+#   - User
+
+# Optional: Add some extra code to the generated files
+# resolver_template: gotpl/resolver.gotpl
+# model_template: gotpl/model.gotpl
+
+# Optional: turn on resolver.Resolver point to interface instead of struct
+# resolver_interfacer: true
+
+# Optional: customize struct names
+# model_match:
+#   - filename: '{fileName}'
+#     match: '^(.+)$'
+#     replace: '${1}'
+
+# Optional: set model conversions
+# model_convert:
+#   # From the protobuf Timestamp to Go's time.Time
+#   github.com/golang/protobuf/ptypes/timestamp.Timestamp:
+#     - type: time.Time
