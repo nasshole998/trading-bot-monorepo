@@ -1,13 +1,14 @@
 <script lang="ts">
-	import './styles.css'; // Basic global styles (create this file)
+	import './styles.css'; // Basic global styles
 </script>
 
 <div class="layout">
 	<header>
 		<h1>Trading Bot UI</h1>
 		<nav>
+            <a href="/dashboard">Dashboard</a>
 			<a href="/backtests">Backtests</a>
-			</nav>
+            <a href="/status">Status</a> </nav>
 	</header>
 
 	<main>
@@ -36,10 +37,16 @@
 	nav a {
 		margin: 0 10px;
 		text-decoration: none;
+		color: #333;
 	}
 
+    nav a:hover {
+        text-decoration: underline;
+    }
+
+
 	main {
-		flex-grow: 1; /* Main content takes up available space */
+		flex-grow: 1;
 		padding: 1rem;
 	}
 
@@ -47,7 +54,7 @@
 		background-color: #f0f0f0;
 		padding: 1rem;
 		text-align: center;
-		margin-top: auto; /* Push footer to the bottom */
+		margin-top: auto;
 	}
 </style>
 

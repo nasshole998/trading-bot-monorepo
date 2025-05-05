@@ -1,0 +1,43 @@
+# src/lib/graphql/queries/dashboard.graphql
+
+# Query to fetch data for the dashboard
+query GetDashboardData($accountId: String!) {
+  # Fetch account state
+  accountState(accountId: $accountId) {
+    accountId
+    timestamp
+    totalEquity
+    totalCapital
+    positions {
+      symbol
+      side
+      quantity
+      avgEntryPrice
+      unrealizedPnl
+    }
+    openOrders {
+      clientOrderId
+      symbol
+      side
+      type
+      status
+      quantity
+      filledQuantity
+      price
+      placedTime
+    }
+  }
+
+  # Fetch risk metrics
+  riskMetrics(accountId: $accountId) {
+    accountId
+    timestamp
+    totalEquity # Redundant but useful for comparison
+    totalRealizedLoss
+    dailyRealizedLoss
+    lastDailyLossReset
+    peakEquity
+    tradingHalted
+    currentTotalNetExposureQuote
+  }
+}

@@ -1,0 +1,13 @@
+# codegen.yml
+schema: "http://localhost:8080/query" # Point to your BFF's GraphQL endpoint
+documents: "src/**/*.graphql"          # Where your .graphql query files are
+
+generates:
+  ./src/lib/graphql/generated/graphql.ts: # Output path for generated TypeScript code
+    plugins:
+      - "typescript"
+      - "typescript-operations"
+      - "graphql-request" # Plugin tailored for graphql-request client
+    config:
+      documentMode: string # Or 'document' depending on your client setup
+      # Other configuration specific to graphql-request

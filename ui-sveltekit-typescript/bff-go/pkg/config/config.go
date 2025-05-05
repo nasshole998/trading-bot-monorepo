@@ -15,16 +15,17 @@ type HTTPConfig struct {
 // GrpcBackendsConfig holds addresses for backend gRPC services
 type GrpcBackendsConfig struct {
 	BacktesterAddress string `yaml:"backtester_address"`
-	// Add fields for other backend addresses
-	// RiskManagementAddress string `yaml:"risk_management_address"`
-	// DataIngestionAddress string `yaml:"data_ingestion_address"`
-	// InfrastructureAddress string `yaml:"infrastructure_address"`
+	RiskManagementAddress string `yaml:"risk_management_address"`
+	DataIngestionAddress string `yaml:"data_ingestion_address"`
+	// **NEW:** Add field for Infrastructure backend address
+	InfrastructureAddress string `yaml:"infrastructure_address"`
 }
 
 // AppConfig holds the overall configuration for the BFF service
 type AppConfig struct {
 	HTTP         HTTPConfig         `yaml:"http"`
 	GrpcBackends GrpcBackendsConfig `yaml:"grpc_backends"`
+	DefaultAccountID string `yaml:"default_account_id"`
 	// Add other config fields
 }
 

@@ -1,0 +1,11 @@
+# src/lib/graphql/queries/status.graphql
+
+# Query to fetch system status data
+query GetSystemStatus {
+  systemStatus {
+    name
+    address
+    status
+    error
+  }
+}

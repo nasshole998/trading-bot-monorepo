@@ -2,11 +2,13 @@
 
 # Define the root query type
 type Query {
-  # List all available backtest summaries
   listBacktests: [Backtest!]!
+  backtest(id: ID!): Backtest
+  accountState(accountId: String!): AccountState
+  riskMetrics(accountId: String!): RiskMetrics
 
-  # **NEW:** Get detailed results for a single backtest by its ID
-  backtest(id: ID!): Backtest # Returns a single Backtest object
+  # **NEW:** Get the status of backend services
+  systemStatus: [ServiceStatus!]!
 }
 
 # Define the Backtest type matching the data from the Backtester service
@@ -18,16 +20,14 @@ type Backtest {
   endTime: String!
   success: Boolean!
   errorMessage: String
-
-  # **NEW:** Add fields for detailed results
   metrics: BacktestMetrics
   trades: [Trade!]!
   equityCurve: [EquityPoint!]!
 }
 
-# **NEW:** Define type for detailed backtest metrics
+# Define type for detailed backtest metrics
 type BacktestMetrics {
-  totalProfit: String! # Use String for precision numbers
+  totalProfit: String!
   totalFees: String!
   sharpeRatio: String!
   sortinoRatio: String!
@@ -42,39 +42,106 @@ type BacktestMetrics {
   totalTrades: Int!
   winningTrades: Int!
   losingTrades: Int!
-  # Add more metrics here
 }
 
-# **NEW:** Define type for an executed trade
+# Define type for an executed trade (from backtest)
 type Trade {
   id: ID
   symbol: String!
-  side: OrderSide! # Use the enum defined below
+  side: OrderSide!
   quantity: String!
   price: String!
   timestamp: String!
   fee: String!
   feeAsset: String!
-  realizedPnl: String # Optional field
-  # Add more trade details
+  realizedPnl: String
 }
 
-# **NEW:** Define type for an equity curve point
+# Define type for an equity curve point (from backtest)
 type EquityPoint {
   timestamp: String!
   equity: String!
 }
 
-# **NEW:** Define enums for OrderSide (mirroring protobuf or market_data.proto)
-# Ensure this matches what your backend returns
+# Define type for the current account state snapshot (mirrors AccountUpdate proto)
+type AccountState {
+    accountId: String!
+    timestamp: String!
+    totalEquity: String!
+    totalCapital: String!
+    positions: [Position!]!
+    openOrders: [OpenOrder!]!
+}
+
+# Define type for a symbol position (mirrors SymbolPosition proto)
+type Position {
+    symbol: String!
+    side: OrderSide!
+    quantity: String!
+    avgEntryPrice: String!
+    unrealizedPnl: String!
+}
+
+# Define type for an open order (mirrors OpenOrder proto)
+type OpenOrder {
+    exchangeOrderId: String
+    clientOrderId: String!
+    symbol: String!
+    side: OrderSide!
+    type: OrderType!
+    status: OrderStatus!
+    quantity: String!
+    filledQuantity: String!
+    price: String!
+    placedTime: String!
+}
+
+# Define type for key risk metrics (mirrors RiskState proto)
+type RiskMetrics {
+    accountId: String!
+    timestamp: String!
+    totalEquity: String!
+    totalRealizedLoss: String!
+    dailyRealizedLoss: String!
+    lastDailyLossReset: String!
+    peakEquity: String!
+    tradingHalted: Boolean!
+    currentTotalNetExposureQuote: String!
+}
+
+# **NEW:** Define type for the status of a single service
+type ServiceStatus {
+  name: String! # Service name (e.g., "Backtester")
+  address: String! # Configured address
+  status: String! # Current status (e.g., "READY", "CONNECTING", "TRANSIENT_FAILURE")
+  error: String # Last error message if status is not READY
+}
+
+
+# Define enums (mirroring protobuf or market_data.proto)
 enum OrderSide {
   BUY
   SELL
-  UNKNOWN_ORDER_SIDE # Handle potential unknown values
+  UNKNOWN_ORDER_SIDE
 }
 
-# Define required inputs (none for listBacktests query)
-# input NewTodo {
-#   text: String!
-#   userId: ID!
-# }
+enum OrderType {
+  MARKET
+  LIMIT
+  STOP
+  STOP_LIMIT
+  UNKNOWN_ORDER_TYPE
+}
+
+enum OrderStatus {
+  NEW
+  ACKNOWLEDGED
+  PARTIALLY_FILLED
+  FILLED
+  CANCELED
+  REJECTED
+  PENDING_CANCEL
+  PENDING_REPLACE
+  EXPIRED
+  UNKNOWN_ORDER_STATUS
+}

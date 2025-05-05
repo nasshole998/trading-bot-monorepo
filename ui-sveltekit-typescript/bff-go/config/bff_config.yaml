@@ -1,13 +1,15 @@
 # Configuration for the UI BFF Go service
 
 http:
-  # Address where the GraphQL HTTP server listens
   listen_address: "0.0.0.0:8080"
 
 grpc_backends:
-  # Address of the Backtester service
   backtester_address: "localhost:50055"
-  # Add addresses for other backend services here as needed (Risk Management, Data Ingestion, Infrastructure)
-  # risk_management_address: "localhost:50056"
-  # data_ingestion_address: "localhost:50052"
-  # infrastructure_address: "localhost:50060" # For Config/Discovery
+  risk_management_address: "localhost:50056"
+  data_ingestion_address: "localhost:50052"
+  # **NEW:** Add address for the Infrastructure service (Config/Discovery)
+  infrastructure_address: "localhost:50060"
+
+default_account_id: "trading_account_1"
+
+# Add other BFF config here
